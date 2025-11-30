@@ -61,7 +61,7 @@ class SAM3DBodyEstimator:
         )
 
     @torch.no_grad()
-    def process_one_image(
+    def process_frames(
         self,
         img_list: List[str], # Union[str, np.ndarray],
         bboxes: Optional[List[np.ndarray]] = None, # Optional[np.ndarray] = None,

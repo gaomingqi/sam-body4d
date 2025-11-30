@@ -4,11 +4,11 @@ sam3:
 sam_3d_body:
   ckpt_path: "path to sam-3d-body-dinov3/model.ckpt"
   mhr_path: "path to sam-3d-body-dinov3/assets/mhr_model.pt"
+  fov_path: "path to moge-2-vitl-normal/model.pt"
   # num of frames processed in parallel
   batch_size: 64
   detector_path: ""
   segmentor_path: ""
-  fov_path: ""
 
 runtime:
   output_dir: "./outputs"

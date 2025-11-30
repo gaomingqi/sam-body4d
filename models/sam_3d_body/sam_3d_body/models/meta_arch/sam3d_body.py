@@ -1753,12 +1753,6 @@ class SAM3DBody(BaseModel):
         )
 
         ## Right...
-        # batch_rhand = prepare_batch(
-        #     img, transform_hand, right_xyxy, cam_int=cam_int.clone()
-        # )
-        # batch_rhand = recursive_to(batch_rhand, "cuda")
-        # rhand_output = self.forward_step(batch_rhand, decoder_type="hand")
-
         batch_rhand_list = []
         batch_rhand_dict = {}
         for idx_img, img in enumerate(img_list):

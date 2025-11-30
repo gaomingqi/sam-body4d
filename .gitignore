@@ -3,5 +3,5 @@ __pycache__/
 gradio_tmp/
 outputs/
 *.egg-info
-# configs/
-# 4db.yaml
+configs/
+4db.yaml

@@ -377,6 +377,6 @@ def process_image_with_mask(estimator, image_path: str, mask_path: str):
         mask_batch.append(mask_binary)
         bbox_batch.append(bbox)
     
-    outputs = estimator.process_one_image(image_batch, bboxes=bbox_batch, masks=mask_batch)
+    outputs = estimator.process_frames(image_batch, bboxes=bbox_batch, masks=mask_batch)
 
     return outputs
