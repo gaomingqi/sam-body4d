@@ -24,7 +24,7 @@ pip install -e .
 ```
 
 ## 🚀 Run the Demo
-#### 1. Download checkpoints of [SAM3](https://huggingface.co/facebook/sam3) and [SAM-3D-Body](https://huggingface.co/facebook/sam-3d-body-dinov3)
+#### 1. Download checkpoints of [SAM3](https://huggingface.co/facebook/sam3), [SAM-3D-Body](https://huggingface.co/facebook/sam-3d-body-dinov3), and [MoGe-2](https://huggingface.co/Ruicheng/moge-2-vitl-normal)
 
 #### 2. Set checkpoint path in [`configs/4db.yaml`](configs/4db.yaml)
 
