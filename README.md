@@ -6,8 +6,8 @@ Promptable Human Mesh Recovery from Videos, based on [SAM-3](https://github.com/
 
 #### 1. Create and Activate Environment
 ```
-conda create -n 4dbd python=3.12 -y
-conda activate 4dbd
+conda create -n 4db python=3.12 -y
+conda activate 4db
 ```
 #### 2. Install PyTorch (choose the version that matches your CUDA), Detectron, and SAM3
 ```
