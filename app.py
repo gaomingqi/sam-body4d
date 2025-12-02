@@ -17,15 +17,15 @@ from tqdm import tqdm
 import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(current_dir, 'models', 'sam_3d_body'))
+sys.path.append(os.path.join(current_dir, 'models', 'diffusion_vas'))
 
 # import sam3
-from utils import draw_point_marker, mask_painter, images_to_mp4, DAVIS_PALETTE, concat_pngs_side_by_side, jpg_folder_to_mp4
+from utils import draw_point_marker, mask_painter, images_to_mp4, DAVIS_PALETTE, jpg_folder_to_mp4
 
 from models.sam_3d_body.sam_3d_body import load_sam_3d_body, SAM3DBodyEstimator
-from models.sam_3d_body.notebook.utils import (
-    visualize_3d_mesh, save_mesh_results, process_image_with_mask
-)
-from models.sam_3d_body.tools.vis_utils import visualize_sample, visualize_sample_together
+from models.sam_3d_body.notebook.utils import process_image_with_mask
+from models.sam_3d_body.tools.vis_utils import visualize_sample_together
+from models.diffusion_vas.demo import init_amodal_segmentation_model, init_rgb_model, init_depth_model
 
 import torch
 # select the device for computation
@@ -122,12 +122,31 @@ def build_sam3_3d_body_config(cfg):
     return estimator
 
 
+def build_diffusion_vas_config(cfg):
+    model_path_mask = cfg.completion['model_path_mask']
+    model_path_rgb = cfg.completion['model_path_rgb']
+    depth_encoder = cfg.completion['depth_encoder']
+    model_path_depth = cfg.completion['model_path_depth']
+    max_occ_len = cfg.completion['max_occ_len']
+
+    generator = torch.manual_seed(23)
+
+    pipeline_mask = init_amodal_segmentation_model(model_path_mask)
+    pipeline_rgb = init_rgb_model(model_path_rgb)
+    model_path_depth = model_path_depth + f"/depth_anything_v2_{depth_encoder}.pth"
+    depth_model = init_depth_model(model_path_depth, depth_encoder)
+
+    return pipeline_mask, pipeline_rgb, depth_model, max_occ_len, generator
+
+
 def init_runtime(config_path: str = os.path.join(ROOT, "configs", "4db.yaml")):
     """Initialize CONFIG, SAM3_MODEL, and global RUNTIME dict."""
-    global CONFIG, sam3_model, predictor, inference_state, sam3_3d_body_model, RUNTIME, OUTPUT_DIR
+    global CONFIG, sam3_model, predictor, inference_state, sam3_3d_body_model, RUNTIME, OUTPUT_DIR, pipeline_mask \
+        , pipeline_rgb, depth_model, max_occ_len, generator
     CONFIG = load_config(config_path)
     sam3_model, predictor = build_sam3_from_config(CONFIG)
     sam3_3d_body_model = build_sam3_3d_body_config(CONFIG)
+    pipeline_mask, pipeline_rgb, depth_model, max_occ_len, generator = build_diffusion_vas_config(CONFIG)
     OUTPUT_DIR = os.path.join(CONFIG.runtime['output_dir'], gen_id())
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 

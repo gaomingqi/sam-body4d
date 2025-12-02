@@ -26,6 +26,9 @@ dependencies = [
     "fvcore~=0.1.5.post20221221",
     "pyrender~=0.1.45",
     "termcolor~=3.2.0",
+    "diffusers==0.29.1",
+    "transformers~=4.57.3",
+    "accelerate~=1.12.0",
 
     # MoGe
     "MoGe @ git+https://github.com/microsoft/MoGe.git",

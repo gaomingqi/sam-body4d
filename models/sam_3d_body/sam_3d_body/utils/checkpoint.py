@@ -104,10 +104,10 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
         err_msg.append(
             "unexpected key in source " f'state_dict: {", ".join(unexpected_keys)}\n'
         )
-    if missing_keys:
-        err_msg.append(
-            f'missing keys in source state_dict: {", ".join(missing_keys)}\n'
-        )
+    # if missing_keys:
+    #     err_msg.append(
+    #         f'missing keys in source state_dict: {", ".join(missing_keys)}\n'
+    #     )
 
     if len(err_msg) > 0:
         err_msg.insert(0, "The model and loaded state dict do not match exactly\n")
