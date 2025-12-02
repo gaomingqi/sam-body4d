@@ -25,7 +25,7 @@ from utils import draw_point_marker, mask_painter, images_to_mp4, DAVIS_PALETTE,
 from models.sam_3d_body.sam_3d_body import load_sam_3d_body, SAM3DBodyEstimator
 from models.sam_3d_body.notebook.utils import process_image_with_mask
 from models.sam_3d_body.tools.vis_utils import visualize_sample_together
-from models.diffusion_vas.demo import init_amodal_segmentation_model, init_rgb_model, init_depth_model
+from models.diffusion_vas.demo import init_amodal_segmentation_model, init_rgb_model, init_depth_model, load_and_transform_masks, load_and_transform_rgbs, rgb_to_depth
 
 import torch
 # select the device for computation
@@ -127,7 +127,7 @@ def build_diffusion_vas_config(cfg):
     model_path_rgb = cfg.completion['model_path_rgb']
     depth_encoder = cfg.completion['depth_encoder']
     model_path_depth = cfg.completion['model_path_depth']
-    max_occ_len = cfg.completion['max_occ_len']
+    max_occ_len = min(cfg.completion['max_occ_len'], cfg.sam_3d_body['batch_size'])
 
     generator = torch.manual_seed(23)
 
@@ -139,6 +139,50 @@ def build_diffusion_vas_config(cfg):
     return pipeline_mask, pipeline_rgb, depth_model, max_occ_len, generator
 
 
+from concurrent.futures import ThreadPoolExecutor
+
+def build_all_models_parallel(CONFIG):
+    enable = CONFIG.completion.get("enable", False)
+
+    # -------- parallel part: SAM3 / SAM3D / Depth --------
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        fut_sam3 = ex.submit(build_sam3_from_config, CONFIG)
+        fut_body = ex.submit(build_sam3_3d_body_config, CONFIG)
+
+        if enable:
+            cfg = CONFIG.completion
+            depth_encoder = cfg["depth_encoder"]
+            depth_ckpt = cfg["model_path_depth"] + f"/depth_anything_v2_{depth_encoder}.pth"
+            fut_depth = ex.submit(init_depth_model, depth_ckpt, depth_encoder, device)
+
+    sam3_model, predictor = fut_sam3.result()
+    sam3_3d_body_model = fut_body.result()
+
+    if not enable:
+        return sam3_model, predictor, sam3_3d_body_model, None, None, None, None, None
+
+    depth_model = fut_depth.result()
+
+    # -------- sequential part: HF pipelines --------
+    cfg = CONFIG.completion
+    pipeline_mask = init_amodal_segmentation_model(cfg["model_path_mask"], device)
+    pipeline_rgb  = init_rgb_model(cfg["model_path_rgb"], device)
+
+    max_occ_len = cfg["max_occ_len"]
+    generator = torch.manual_seed(23)
+
+    return (
+        sam3_model,
+        predictor,
+        sam3_3d_body_model,
+        pipeline_mask,
+        pipeline_rgb,
+        depth_model,
+        max_occ_len,
+        generator,
+    )
+
+
 def init_runtime(config_path: str = os.path.join(ROOT, "configs", "4db.yaml")):
     """Initialize CONFIG, SAM3_MODEL, and global RUNTIME dict."""
     global CONFIG, sam3_model, predictor, inference_state, sam3_3d_body_model, RUNTIME, OUTPUT_DIR, pipeline_mask \
@@ -146,7 +190,14 @@ def init_runtime(config_path: str = os.path.join(ROOT, "configs", "4db.yaml")):
     CONFIG = load_config(config_path)
     sam3_model, predictor = build_sam3_from_config(CONFIG)
     sam3_3d_body_model = build_sam3_3d_body_config(CONFIG)
-    pipeline_mask, pipeline_rgb, depth_model, max_occ_len, generator = build_diffusion_vas_config(CONFIG)
+
+    if CONFIG.completion.get('enable', False):
+        pipeline_mask, pipeline_rgb, depth_model, max_occ_len, generator = build_diffusion_vas_config(CONFIG)
+    else:
+        pipeline_mask, pipeline_rgb, depth_model, max_occ_len, generator = None, None, None, None, None
+
+    # sam3_model, predictor, sam3_3d_body_model, pipeline_mask, pipeline_rgb, depth_model, max_occ_len, generator = build_all_models_parallel(CONFIG)
+
     OUTPUT_DIR = os.path.join(CONFIG.runtime['output_dir'], gen_id())
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -530,12 +581,70 @@ def on_4d_generation(video_path: str):
     os.makedirs(f"{OUTPUT_DIR}/mask_4d", exist_ok=True)
     batch_size = RUNTIME['batch_size']
     n = len(images_list)
+    
+    # Optional, detect occlusions
+    pred_res = [128, 256]
+    modal_pixels_list = []
+    if pipeline_mask is not None:
+        for obj_id in RUNTIME['out_obj_ids']:
+            modal_pixels, ori_shape = load_and_transform_masks(OUTPUT_DIR + "/masks", resolution=pred_res, obj_id=obj_id)
+            modal_pixels_list.append(modal_pixels)
+        rgb_pixels, _, raw_rgb_pixels = load_and_transform_rgbs(OUTPUT_DIR + "/images", resolution=pred_res)
+        depth_pixels = rgb_to_depth(rgb_pixels, depth_model)
+
     for i in tqdm(range(0, n, batch_size)):
         batch_images = images_list[i:i + batch_size]
         batch_masks  = masks_list[i:i + batch_size]
-    
+
+        W, H = Image.open(batch_masks[0]).size
+
+        # Optional, detect occlusions
+        if len(modal_pixels_list) > 0:
+            print("detect occlusions ...")
+            rgb_pixels_batch = rgb_pixels[:, i:i + batch_size, :, :, :]
+            raw_rgb_pixels_batch = raw_rgb_pixels[i:i + batch_size, :, :, :]
+            # modal_pixels_batch = torch.cat([mp[:, i:i + batch_size, :, :, :] for mp in modal_pixels_list], dim=0)
+
+            pred_amodal_masks_list = []
+            idx_dict = {}
+            for (modal_pixels, obj_id) in zip(modal_pixels_list, RUNTIME['out_obj_ids']):
+                # predict amodal masks (amodal segmentation)
+                pred_amodal_masks = pipeline_mask(
+                    modal_pixels[:, i:i + batch_size, :, :, :],
+                    depth_pixels[:, i:i + batch_size, :, :, :],
+                    height=pred_res[0],
+                    width=pred_res[1],
+                    num_frames=modal_pixels[:, i:i + batch_size, :, :, :].shape[1],
+                    decode_chunk_size=8,
+                    motion_bucket_id=127,
+                    fps=8,
+                    noise_aug_strength=0.02,
+                    min_guidance_scale=1.5,
+                    max_guidance_scale=1.5,
+                    generator=generator,
+                ).frames[0]
+                pred_amodal_masks = [np.array(img.resize((W, H))) for img in pred_amodal_masks]
+                # pred_amodal_masks = [np.array(img) for img in pred_amodal_masks]
+                pred_amodal_masks = np.array(pred_amodal_masks).astype('uint8')
+                pred_amodal_masks = (pred_amodal_masks.sum(axis=-1) > 600).astype('uint8')
+                pred_amodal_masks_list.append(pred_amodal_masks)
+                masks = [(np.array(Image.open(bm).convert('P'))==obj_id).astype('uint8') for bm in batch_masks]
+
+                # ious = [(np.logical_and(a>0, b>0).sum()) / (np.logical_or(a>0, b>0).sum() + 1e-6) for (a, b) in zip(masks, pred_amodal_masks)]
+                ious = [
+                    (
+                        1.0 if ((a > 0).sum() == 0 and (b > 0).sum() == 0)
+                        else np.logical_and(a > 0, b > 0)[(a > 0) | (b > 0)].sum() /
+                            (np.logical_or(a > 0, b > 0)[(a > 0) | (b > 0)].sum() + 1e-6)
+                    )
+                    for a, b in zip(masks, pred_amodal_masks)
+                ]
+                start, end = (idxs := [i for i,x in enumerate(ious) if x < 0.7]) and (idxs[0], idxs[-1]) or (None, None)
+                if start is not None and end is not None:
+                    idx_dict[obj_id] = (start + i, end + i)
+
         # Process with external mask
-        mask_outputs, id_batch = process_image_with_mask(sam3_3d_body_model, batch_images, batch_masks)
+        mask_outputs, id_batch = process_image_with_mask(sam3_3d_body_model, batch_images, batch_masks, pipeline_mask, pipeline_rgb, depth_model, OUTPUT_DIR)
         
         for image_path, mask_output, id_current in zip(batch_images, mask_outputs, id_batch):
             img = cv2.imread(image_path)

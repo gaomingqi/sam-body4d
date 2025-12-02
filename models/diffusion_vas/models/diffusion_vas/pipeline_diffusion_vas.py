@@ -459,7 +459,7 @@ class DiffusionVASPipeline(DiffusionPipeline):
         self.check_inputs(images[0], height, width)
 
         # 2. Define call parameters
-        batch_size = 1
+        batch_size = images.shape[0]
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`

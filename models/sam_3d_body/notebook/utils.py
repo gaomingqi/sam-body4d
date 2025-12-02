@@ -328,7 +328,7 @@ def display_results_grid(
     plt.show()
 
 
-def process_image_with_mask(estimator, image_path: str, mask_path: str):
+def process_image_with_mask(estimator, image_path: str, mask_path: str, pipeline_mask, pipeline_rgb, depth_model, OUTPUT_DIR):
     """
     Process image with external mask input.
 
@@ -344,7 +344,6 @@ def process_image_with_mask(estimator, image_path: str, mask_path: str):
     for i in range(n):
         # Load mask
         mask = np.array(Image.open(mask_path[i]).convert('P'))
-        # mask = cv2.imread(mask_path[i], cv2.IMREAD_GRAYSCALE)
         obj_ids = np.unique(mask)
         obj_ids = obj_ids[obj_ids != 0].astype(int).tolist()
 
@@ -356,18 +355,10 @@ def process_image_with_mask(estimator, image_path: str, mask_path: str):
             zero_mask[mask==obj_id] = 255
             mask_binary = zero_mask.astype(np.uint8)
             mask_list.append(mask_binary)
-            # if mask.max() > 0:
-            #     id_current.append(obj_id)
-
-            # print(f"Processing image with external mask: {mask_path}")
-            # print(f"Mask shape: {mask_binary.shape}, unique values: {np.unique(mask_binary)}")
-
             # Compute bounding box from mask (required by refactored code)
             # Find all non-zero pixels in the mask
             coords = cv2.findNonZero(mask_binary)
-            # if coords is None:
-                # print("Warning: Mask is empty, no objects detected")
-                # return []
+            
             if mask_binary.max() > 0:
                 id_current.append(obj_id)
 
@@ -387,6 +378,10 @@ def process_image_with_mask(estimator, image_path: str, mask_path: str):
         mask_batch.append(mask_binary)
         bbox_batch.append(bbox)
     
+    # Optional, detect occlusions
+    if pipeline_mask is not None:
+        modal_pixels, ori_shape = load_and_transform_masks(seq_path + "/masks", resolution=pred_res, obj_id=obj_id)
+
     outputs = estimator.process_frames(image_batch, bboxes=bbox_batch, masks=mask_batch, id_batch=id_batch)
 
     return outputs, id_batch
