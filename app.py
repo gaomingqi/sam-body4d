@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch.nn.functional as F
 
+import random
 import glob
 from tqdm import tqdm
 
@@ -584,6 +585,7 @@ def on_4d_generation(video_path: str):
     
     # Optional, detect occlusions
     pred_res = [128, 256]
+    pred_res_hi = [512, 1024]
     modal_pixels_list = []
     if pipeline_mask is not None:
         for obj_id in RUNTIME['out_obj_ids']:
@@ -604,9 +606,9 @@ def on_4d_generation(video_path: str):
             rgb_pixels_batch = rgb_pixels[:, i:i + batch_size, :, :, :]
             raw_rgb_pixels_batch = raw_rgb_pixels[i:i + batch_size, :, :, :]
             # modal_pixels_batch = torch.cat([mp[:, i:i + batch_size, :, :, :] for mp in modal_pixels_list], dim=0)
-
-            pred_amodal_masks_list = []
+            pred_amodal_masks_dict = {}
             idx_dict = {}
+            idx_path = {}
             for (modal_pixels, obj_id) in zip(modal_pixels_list, RUNTIME['out_obj_ids']):
                 # predict amodal masks (amodal segmentation)
                 pred_amodal_masks = pipeline_mask(
@@ -623,14 +625,18 @@ def on_4d_generation(video_path: str):
                     max_guidance_scale=1.5,
                     generator=generator,
                 ).frames[0]
+
+                # for completion
+                pred_amodal_masks_com = [np.array(img.resize((pred_res_hi[1], pred_res_hi[0]))) for img in pred_amodal_masks]
+                pred_amodal_masks_com = np.array(pred_amodal_masks_com).astype('uint8')
+                pred_amodal_masks_com = (pred_amodal_masks_com.sum(axis=-1) > 600).astype('uint8')
+                pred_amodal_masks_dict[obj_id] = pred_amodal_masks_com
+                # for iou
                 pred_amodal_masks = [np.array(img.resize((W, H))) for img in pred_amodal_masks]
-                # pred_amodal_masks = [np.array(img) for img in pred_amodal_masks]
                 pred_amodal_masks = np.array(pred_amodal_masks).astype('uint8')
                 pred_amodal_masks = (pred_amodal_masks.sum(axis=-1) > 600).astype('uint8')
-                pred_amodal_masks_list.append(pred_amodal_masks)
+                # compute iou
                 masks = [(np.array(Image.open(bm).convert('P'))==obj_id).astype('uint8') for bm in batch_masks]
-
-                # ious = [(np.logical_and(a>0, b>0).sum()) / (np.logical_or(a>0, b>0).sum() + 1e-6) for (a, b) in zip(masks, pred_amodal_masks)]
                 ious = [
                     (
                         1.0 if ((a > 0).sum() == 0 and (b > 0).sum() == 0)
@@ -639,9 +645,75 @@ def on_4d_generation(video_path: str):
                     )
                     for a, b in zip(masks, pred_amodal_masks)
                 ]
-                start, end = (idxs := [i for i,x in enumerate(ious) if x < 0.7]) and (idxs[0], idxs[-1]) or (None, None)
+                
+                # confirm occlusions & save masks (for HMR)
+                start, end = (idxs := [ix for ix,x in enumerate(ious) if x < 0.7]) and (idxs[0], idxs[-1]) or (None, None)
                 if start is not None and end is not None:
-                    idx_dict[obj_id] = (start + i, end + i)
+                    start = max(0, start-2)
+                    end = min(modal_pixels[:, i:i + batch_size, :, :, :].shape[1]-1, end+2)
+                    idx_dict[obj_id] = (start, end)
+                    completion_path = ''.join(random.choices('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', k=4))
+                    completion_image_path = f'{OUTPUT_DIR}/completion/{completion_path}/images'
+                    completion_masks_path = f'{OUTPUT_DIR}/completion/{completion_path}/masks'
+                    os.makedirs(completion_image_path, exist_ok=True)
+                    os.makedirs(completion_masks_path, exist_ok=True)
+                    idx_path[obj_id] = {'images': completion_image_path, 'masks': completion_masks_path}
+                    # save completion masks
+                    for idx_ in range(start, end):
+                        mask_idx_ = pred_amodal_masks[idx_].copy()
+                        mask_idx_[mask_idx_ > 0] = obj_id
+                        mask_idx_ = Image.fromarray(mask_idx_).convert('P')
+                        mask_idx_.putpalette(DAVIS_PALETTE)
+                        mask_idx_.save(os.path.join(completion_masks_path, f"{idx_:08d}.png"))
+
+            # completion
+            for obj_id, (start, end) in idx_dict.items(): 
+                completion_image_path = idx_path[obj_id]['images']
+                # prepare inputs
+                modal_pixels_current, ori_shape = load_and_transform_masks(OUTPUT_DIR + "/masks", resolution=pred_res_hi, obj_id=obj_id)
+                rgb_pixels_current, _, raw_rgb_pixels_current = load_and_transform_rgbs(OUTPUT_DIR + "/images", resolution=pred_res_hi)
+                modal_pixels_current = modal_pixels_current[:, i:i + batch_size, :, :, :]
+                modal_pixels_current = modal_pixels_current[:, start:end]
+                pred_amodal_masks_current = pred_amodal_masks_dict[obj_id][start:end]
+                modal_mask_union = (modal_pixels_current[0, :, 0, :, :].cpu().numpy() > 0).astype('uint8')
+                pred_amodal_masks_current = np.logical_or(pred_amodal_masks_current, modal_mask_union).astype('uint8')
+                pred_amodal_masks_tensor = torch.from_numpy(np.where(pred_amodal_masks_current == 0, -1, 1)).float().unsqueeze(0).unsqueeze(
+                    2).repeat(1, 1, 3, 1, 1)
+                
+                rgb_pixels_current = rgb_pixels_current[:, i:i + batch_size, :, :, :][:, start:end]
+                modal_obj_mask = (modal_pixels_current > 0).float()
+                modal_background = 1 - modal_obj_mask
+                rgb_pixels_current = (rgb_pixels_current + 1) / 2
+                modal_rgb_pixels = rgb_pixels_current * modal_obj_mask + modal_background
+                modal_rgb_pixels = modal_rgb_pixels * 2 - 1
+
+                print("content completion by diffusion-vas ...")
+                # predict amodal rgb (content completion)
+                pred_amodal_rgb = pipeline_rgb(
+                    modal_rgb_pixels,
+                    pred_amodal_masks_tensor,
+                    height=pred_res_hi[0], # my_res[0]
+                    width=pred_res_hi[1],  # my_res[1]
+                    num_frames=end-start,
+                    decode_chunk_size=8,
+                    motion_bucket_id=127,
+                    fps=8,
+                    noise_aug_strength=0.02,
+                    min_guidance_scale=1.5,
+                    max_guidance_scale=1.5,
+                    generator=generator,
+                ).frames[0]
+
+                pred_amodal_rgb = [np.array(img) for img in pred_amodal_rgb]
+
+                # save pred_amodal_rgb
+                pred_amodal_rgb = np.array(pred_amodal_rgb).astype('uint8')
+                pred_amodal_rgb_save = np.array([cv2.resize(frame, (ori_shape[1], ori_shape[0]), interpolation=cv2.INTER_LINEAR)
+                                                for frame in pred_amodal_rgb])
+                idx_ = start
+                for img in pred_amodal_rgb_save:
+                    cv2.imwrite(os.path.join(completion_image_path, f"{idx_:08d}.png"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                    idx_ += 1
 
         # Process with external mask
         mask_outputs, id_batch = process_image_with_mask(sam3_3d_body_model, batch_images, batch_masks, pipeline_mask, pipeline_rgb, depth_model, OUTPUT_DIR)
@@ -691,7 +763,7 @@ with gr.Blocks(title="SAM3-4D-Body") as demo:
             current_frame = gr.Image(
                 label="Current Frame (click to annotate)",
                 interactive=True,
-                sources=[],  # 禁止上传
+                sources=[],
             )
 
             toggle_upload_btn = gr.Button(
@@ -717,7 +789,6 @@ with gr.Blocks(title="SAM3-4D-Body") as demo:
 
             time_text = gr.Text("00:00 / 00:00", label="Time")
 
-            # ✅ 用 Radio 表示正 / 负 点，天然互斥
             point_radio = gr.Radio(
                 choices=["Positive", "Negative"],
                 value="Positive",
@@ -772,7 +843,6 @@ with gr.Blocks(title="SAM3-4D-Body") as demo:
         outputs=[current_frame, time_text],
     )
 
-    # Radio → 更新 point_type_state（转小写方便后面用）
     point_radio.change(
         fn=lambda v: v.lower(),   # "Positive" / "Negative" → "positive" / "negative"
         inputs=[point_radio],
@@ -793,18 +863,16 @@ with gr.Blocks(title="SAM3-4D-Body") as demo:
         outputs=[targets_state, selected_targets_state, targets_box],
     )
 
-    # Mask generation button → 上方 Seg Result 视频
     mask_gen_btn.click(
         fn=on_mask_generation,
-        inputs=[video_state],      # 输入需要 video_path
-        outputs=[result_display],  # 输出到上面的 seg result 视频窗口
+        inputs=[video_state], 
+        outputs=[result_display],
     )
 
-    # 4D generation button → 下方 4D Result 视频
     gen4d_btn.click(
         fn=on_4d_generation,
-        inputs=[video_state],      # 先把 video_path 传进来，后面可以用
-        outputs=[fourd_display],   # 输出到下面的 4D Result 视频窗口
+        inputs=[video_state],      
+        outputs=[fourd_display],  
     )
 
 
