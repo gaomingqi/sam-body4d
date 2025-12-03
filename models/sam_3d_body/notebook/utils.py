@@ -328,7 +328,7 @@ def display_results_grid(
     plt.show()
 
 
-def process_image_with_mask(estimator, image_path: str, mask_path: str, pipeline_mask, pipeline_rgb, depth_model, OUTPUT_DIR):
+def process_image_with_mask(estimator, image_path: str, mask_path: str, idx_path, idx_dict):
     """
     Process image with external mask input.
 
@@ -351,6 +351,12 @@ def process_image_with_mask(estimator, image_path: str, mask_path: str, pipeline
         bbox_list = []
         id_current = []
         for obj_id in obj_ids:
+
+            if obj_id in idx_dict:
+                start, end = idx_dict[obj_id]
+                if i >= start and i < end:
+                    mask = np.array(Image.open(os.path.join(idx_path[obj_id]['masks'], f"{i:08d}.png")).convert('P'))
+
             zero_mask = np.zeros_like(mask)
             zero_mask[mask==obj_id] = 255
             mask_binary = zero_mask.astype(np.uint8)
@@ -378,10 +384,6 @@ def process_image_with_mask(estimator, image_path: str, mask_path: str, pipeline
         mask_batch.append(mask_binary)
         bbox_batch.append(bbox)
     
-    # Optional, detect occlusions
-    if pipeline_mask is not None:
-        modal_pixels, ori_shape = load_and_transform_masks(seq_path + "/masks", resolution=pred_res, obj_id=obj_id)
-
-    outputs = estimator.process_frames(image_batch, bboxes=bbox_batch, masks=mask_batch, id_batch=id_batch)
+    outputs = estimator.process_frames(image_batch, bboxes=bbox_batch, masks=mask_batch, id_batch=id_batch, idx_path=idx_path, idx_dict=idx_dict)
 
     return outputs, id_batch

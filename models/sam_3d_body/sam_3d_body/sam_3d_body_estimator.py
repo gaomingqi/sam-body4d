@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 from typing import Optional, Union, List
 
+import os
 import cv2
 
 import numpy as np
@@ -73,6 +74,8 @@ class SAM3DBodyEstimator:
         use_mask: bool = False,
         inference_type: str = "full",
         id_batch: Optional[List[List[int]]] = None,
+        idx_path=None, 
+        idx_dict=None,
     ):
         """
         Perform model prediction in top-down format: assuming input is a full image.
@@ -167,7 +170,14 @@ class SAM3DBodyEstimator:
                 boxes = np.concatenate([boxes, np.repeat(boxes[-1][None, :], pad, axis=0)], axis=0)
                 masks_binary = np.concatenate([masks_binary, np.repeat(masks_binary[-1][None, :], pad, axis=0)], axis=0)
 
-            batch = prepare_batch(img, self.transform, boxes, masks_binary, masks_score)
+            img_com_dict = {}
+            for idx_k, (idx_start,idx_end) in idx_dict.items():
+                if i >= idx_start and i < idx_end:
+                    img_com = load_image(os.path.join(idx_path[idx_k]['images'], f"{i:08d}.jpg"), backend="cv2", image_format="bgr")
+                    img_com = cv2.cvtColor(img_com, cv2.COLOR_BGR2RGB)
+                    img_com_dict[idx_k-1] = img_com
+
+            batch = prepare_batch(img, self.transform, boxes, masks_binary, masks_score, img_com_dict=img_com_dict)
 
         # Handle camera intrinsics
         # - either provided externally or generated via default FOV estimator
@@ -216,6 +226,8 @@ class SAM3DBodyEstimator:
             inference_type=inference_type,
             transform_hand=self.transform_hand,
             thresh_wrist_angle=self.thresh_wrist_angle,
+            idx_path=idx_path,
+            idx_dict=idx_dict,
         )
         if inference_type == "full":
             pose_output, batch_lhand, batch_rhand, _, _ = outputs

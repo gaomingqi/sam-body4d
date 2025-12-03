@@ -8,6 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import os
+import cv2
+
+from sam_3d_body.data.utils.io import load_image
 from sam_3d_body.data.utils.prepare_batch import prepare_batch
 from sam_3d_body.models.decoders.prompt_encoder import PositionEmbeddingRandom
 from sam_3d_body.models.modules.mhr_utils import (
@@ -1654,6 +1658,8 @@ class SAM3DBody(BaseModel):
         inference_type: str = "full",
         transform_hand: Any = None,
         thresh_wrist_angle=1.4,
+        idx_path=None,
+        idx_dict=None,
     ):
         """
         Run 3DB inference (optionally with hand detector).
@@ -1698,8 +1704,16 @@ class SAM3DBody(BaseModel):
         num_objects = len(batch['bbox_format'])
         for idx_img, img in enumerate(img_list):
             flipped_img = img[:, ::-1]
+
+            img_com_dict = {}
+            for idx_k, (idx_start,idx_end) in idx_dict.items():
+                if idx_img >= idx_start and idx_img < idx_end:
+                    img_com = load_image(os.path.join(idx_path[idx_k]['images'], f"{idx_img:08d}.jpg"), backend="cv2", image_format="bgr")
+                    img_com = cv2.cvtColor(img_com, cv2.COLOR_BGR2RGB)
+                    img_com_dict[idx_k-1] = img_com[:, ::-1]
+
             batch_lhand = prepare_batch(
-                flipped_img, transform_hand, left_xyxy[idx_img*num_objects:(idx_img+1)*num_objects], cam_int=cam_int.clone()[idx_img:idx_img+1]
+                flipped_img, transform_hand, left_xyxy[idx_img*num_objects:(idx_img+1)*num_objects], cam_int=cam_int.clone()[idx_img:idx_img+1], img_com_dict=img_com_dict,
             )
             batch_lhand_list.append(batch_lhand)
         
@@ -1756,8 +1770,16 @@ class SAM3DBody(BaseModel):
         batch_rhand_list = []
         batch_rhand_dict = {}
         for idx_img, img in enumerate(img_list):
+
+            img_com_dict = {}
+            for idx_k, (idx_start,idx_end) in idx_dict.items():
+                if idx_img >= idx_start and idx_img < idx_end:
+                    img_com = load_image(os.path.join(idx_path[idx_k]['images'], f"{idx_img:08d}.jpg"), backend="cv2", image_format="bgr")
+                    img_com = cv2.cvtColor(img_com, cv2.COLOR_BGR2RGB)
+                    img_com_dict[idx_k-1] = img_com[:, ::-1]
+
             batch_rhand = prepare_batch(
-                img, transform_hand, right_xyxy[idx_img*num_objects:(idx_img+1)*num_objects], cam_int=cam_int.clone()[idx_img:idx_img+1]
+                img, transform_hand, right_xyxy[idx_img*num_objects:(idx_img+1)*num_objects], cam_int=cam_int.clone()[idx_img:idx_img+1], img_com_dict=img_com_dict,
             )
             batch_rhand_list.append(batch_rhand)
         

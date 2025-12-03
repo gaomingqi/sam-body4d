@@ -17,6 +17,7 @@ def prepare_batch(
     masks=None,
     masks_score=None,
     cam_int=None,
+    img_com_dict=None,  # optional dict of complementary images for each box index
 ):
     """A helper function to prepare data batch for SAM 3D Body model inference."""
     height, width = img.shape[:2]
@@ -24,7 +25,10 @@ def prepare_batch(
     # construct batch data samples
     data_list = []
     for idx in range(boxes.shape[0]):
-        data_info = dict(img=img)
+        if idx in img_com_dict:
+            data_info = dict(img=img_com_dict[idx])    
+        else:
+            data_info = dict(img=img)
         data_info["bbox"] = boxes[idx]  # shape (4,)
         data_info["bbox_format"] = "xyxy"
 

@@ -106,9 +106,9 @@ def build_sam3_3d_body_config(cfg):
     
     human_detector, human_segmentor, fov_estimator = None, None, None
     from models.sam_3d_body.tools.build_detector import HumanDetector
-    human_detector = HumanDetector(
-        name='vitdet', device=device, path=detector_path
-    )
+    # human_detector = HumanDetector(
+    #     name='vitdet', device=device, path=detector_path
+    # )
     from models.sam_3d_body.tools.build_fov_estimator import FOVEstimator
     fov_estimator = FOVEstimator(name='moge2', device=device, path=fov_path)
 
@@ -584,7 +584,7 @@ def on_4d_generation(video_path: str):
     n = len(images_list)
     
     # Optional, detect occlusions
-    pred_res = [128, 256]
+    pred_res = [256, 512]
     pred_res_hi = [512, 1024]
     modal_pixels_list = []
     if pipeline_mask is not None:
@@ -601,14 +601,14 @@ def on_4d_generation(video_path: str):
         W, H = Image.open(batch_masks[0]).size
 
         # Optional, detect occlusions
+        idx_dict = {}
+        idx_path = {}
         if len(modal_pixels_list) > 0:
             print("detect occlusions ...")
-            rgb_pixels_batch = rgb_pixels[:, i:i + batch_size, :, :, :]
-            raw_rgb_pixels_batch = raw_rgb_pixels[i:i + batch_size, :, :, :]
+            # rgb_pixels_batch = rgb_pixels[:, i:i + batch_size, :, :, :]
+            # raw_rgb_pixels_batch = raw_rgb_pixels[i:i + batch_size, :, :, :]
             # modal_pixels_batch = torch.cat([mp[:, i:i + batch_size, :, :, :] for mp in modal_pixels_list], dim=0)
             pred_amodal_masks_dict = {}
-            idx_dict = {}
-            idx_path = {}
             for (modal_pixels, obj_id) in zip(modal_pixels_list, RUNTIME['out_obj_ids']):
                 # predict amodal masks (amodal segmentation)
                 pred_amodal_masks = pipeline_mask(
@@ -712,11 +712,11 @@ def on_4d_generation(video_path: str):
                                                 for frame in pred_amodal_rgb])
                 idx_ = start
                 for img in pred_amodal_rgb_save:
-                    cv2.imwrite(os.path.join(completion_image_path, f"{idx_:08d}.png"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(os.path.join(completion_image_path, f"{idx_:08d}.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
                     idx_ += 1
 
         # Process with external mask
-        mask_outputs, id_batch = process_image_with_mask(sam3_3d_body_model, batch_images, batch_masks, pipeline_mask, pipeline_rgb, depth_model, OUTPUT_DIR)
+        mask_outputs, id_batch = process_image_with_mask(sam3_3d_body_model, batch_images, batch_masks, idx_path, idx_dict)
         
         for image_path, mask_output, id_current in zip(batch_images, mask_outputs, id_batch):
             img = cv2.imread(image_path)
