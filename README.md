@@ -1,6 +1,13 @@
-# SAM-Body4D
+<h1 align="center">🏂 SAM-Body4D</h1>
 
-SAM-Body4D is a training-free framework for 4D human mesh recovery from in-the-wild videos, featuring: 🔄 temporally consistent human mesh reconstruction and 🎯 robust performance in complex real-world scenes.
+**SAM-Body4D** is a **training-free** framework for **temporally consistent** and **robust** 4D human mesh recovery from videos.  
+By leveraging **pixel-level human continuity** from promptable video segmentation **together with occlusion recovery**, it reliably preserves identity and full-body geometry in challenging in-the-wild scenes.
+
+### ✨ Key Features
+
+- **Temporally consistent human meshes across the entire video**
+- **Robust multi-human recovery under heavy occlusions**
+
 
 <!-- Training-Free 4D Human Mesh Recovery from Videos, based on [SAM-3](https://github.com/facebookresearch/sam3), [Diffusion-VAS](https://github.com/Kaihua-Chen/diffusion-vas), and [SAM-3D-Body](https://github.com/facebookresearch/sam-3d-body). -->
 
