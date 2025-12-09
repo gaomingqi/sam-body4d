@@ -6,10 +6,12 @@
 
 <sup>1</sup> University of Sheffield, <sup>2</sup> University of Warwick, <sup>3</sup> Tsinghua University
 
-**SAM-Body4D** is a **training-free** method for **temporally consistent** and **robust** 4D human mesh recovery from videos.
-By leveraging **pixel-level human continuity** from promptable video segmentation **together with occlusion recovery**, it reliably preserves identity and full-body geometry in challenging in-the-wild scenes.
-
 [ 📖 [`Paper`](assets/SAM_Body4D.pdf)] [ 🌐 [`Website` (coming soon)](https://seominseok0429.github.io/Upsample-Anything/)] [ 📝 [`BibTeX` (coming soon)](#-citation)]
+
+---
+
+🏂 **SAM-Body4D** is a **training-free** method for **temporally consistent** and **robust** 4D human mesh recovery from videos.
+By leveraging **pixel-level human continuity** from promptable video segmentation **together with occlusion recovery**, it reliably preserves identity and full-body geometry in challenging in-the-wild scenes.
 
 ### ✨ Key Features
 
@@ -19,7 +21,9 @@ By leveraging **pixel-level human continuity** from promptable video segmentatio
 
 <!-- Training-Free 4D Human Mesh Recovery from Videos, based on [SAM-3](https://github.com/facebookresearch/sam3), [Diffusion-VAS](https://github.com/Kaihua-Chen/diffusion-vas), and [SAM-3D-Body](https://github.com/facebookresearch/sam-3d-body). -->
 
-## 🖥️ Installation
+---
+
+### 🖥️ Installation
 
 #### 1. Create and Activate Environment
 ```
@@ -40,7 +44,9 @@ https://pytorch.org/get-started/previous-versions/
 pip install -e .
 ```
 
-## 🚀 Run the Demo
+---
+
+### 🚀 Run the Demo
 #### 1. Download checkpoints of [SAM3](https://huggingface.co/facebook/sam3), [SAM-3D-Body](https://huggingface.co/facebook/sam-3d-body-dinov3), [MoGe-2](https://huggingface.co/Ruicheng/moge-2-vitl-normal), [Diffusion-VAS](https://github.com/Kaihua-Chen/diffusion-vas?tab=readme-ov-file#download-checkpoints), and [Depth-Anything V2](https://huggingface.co/depth-anything/Depth-Anything-V2-Large/resolve/main/depth_anything_v2_vitl.pth?download=true)
 
 #### 2. Set checkpoint path and running configs in [`configs/body4d.yaml`](configs/body4d.yaml)
@@ -50,12 +56,16 @@ pip install -e .
 python app.py
 ```
 
-## 📝 Citation
+---
+
+### 📝 Citation
 If you find this repository useful, please consider giving a star ⭐ and citation.
 ```
 coming soon
 ```
 
-## 👏 Acknowledgements
+---
+
+### 👏 Acknowledgements
 
 The project is built upon [SAM-3](https://github.com/facebookresearch/sam3), [Diffusion-VAS](https://github.com/Kaihua-Chen/diffusion-vas) and [SAM-3D-Body](https://github.com/facebookresearch/sam-3d-body). We sincerely thank the original authors for their outstanding work and contributions. 

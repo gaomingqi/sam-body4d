@@ -2164,18 +2164,18 @@ class SAM3DBody(BaseModel):
             pose_output["mhr"]["scale"] = scale_3d.view(B, D_scale)
             pose_output["mhr"]["shape"] = shape_3d.view(B, D_shape)
 
-            # -----------------
-            # smooth global rot
-            pose_output["mhr"] = ema_smooth_global_rot_per_obj_id_adaptive(
-                mhr_dict=pose_output["mhr"],
-                num_frames=len(img_list),
-                frame_obj_ids=id_batch,
-                key_name="global_rot",
-                alpha_strong=0.1,   # heavy smooth
-                alpha_weak=0.3,     # tiny smooth
-                motion_low=0.05,    # threshold to static
-                motion_high=0.30,   # do not smooth over this
-            )
+            # # -----------------
+            # # smooth global rot
+            # pose_output["mhr"] = ema_smooth_global_rot_per_obj_id_adaptive(
+            #     mhr_dict=pose_output["mhr"],
+            #     num_frames=len(img_list),
+            #     frame_obj_ids=id_batch,
+            #     key_name="global_rot",
+            #     # alpha_strong=0.1,   # heavy smooth
+            #     # alpha_weak=0.3,     # tiny smooth
+            #     # motion_low=0.05,    # threshold to static
+            #     # motion_high=0.30,   # do not smooth over this
+            # )
 
             verts, j3d, jcoords, mhr_model_params, joint_global_rots = (
                 self.head_pose.mhr_forward(
