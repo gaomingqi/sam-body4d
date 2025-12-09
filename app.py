@@ -21,7 +21,7 @@ sys.path.append(os.path.join(current_dir, 'models', 'sam_3d_body'))
 sys.path.append(os.path.join(current_dir, 'models', 'diffusion_vas'))
 
 # import sam3
-from utils import draw_point_marker, mask_painter, images_to_mp4, DAVIS_PALETTE, jpg_folder_to_mp4, is_super_long_or_wide, keep_largest_component, is_skinny_mask, bbox_from_mask, are_bboxes_similar
+from utils import draw_point_marker, mask_painter, images_to_mp4, DAVIS_PALETTE, jpg_folder_to_mp4, is_super_long_or_wide, keep_largest_component, is_skinny_mask, bbox_from_mask, are_bboxes_similar, resize_mask_with_unique_label
 
 from models.sam_3d_body.sam_3d_body import load_sam_3d_body, SAM3DBodyEstimator
 from models.sam_3d_body.notebook.utils import process_image_with_mask
@@ -545,6 +545,7 @@ def on_4d_generation(video_path: str):
         depth_pixels = rgb_to_depth(rgb_pixels, depth_model)
 
     mhr_shape_scale_dict = {}   # each element is a list storing input parameters for mhr_forward
+    obj_ratio_dict = {}         # avoid fake completion by obj ratio on the first frame
 
     for i in tqdm(range(0, n, batch_size)):
         batch_images = images_list[i:i + batch_size]
@@ -557,6 +558,7 @@ def on_4d_generation(video_path: str):
         idx_path = {}
         if len(modal_pixels_list) > 0:
             print("detect occlusions ...")
+            pred_amodal_masks_dict = {}
             for (modal_pixels, obj_id) in zip(modal_pixels_list, RUNTIME['out_obj_ids']):
                 # detect occlusions for each object
                 # predict amodal masks (amodal segmentation)
@@ -575,17 +577,31 @@ def on_4d_generation(video_path: str):
                     generator=generator,
                 ).frames[0]
 
-                # for iou (localise occlusions spatial-temporally)
+                # for completion
+                pred_amodal_masks_com = [np.array(img.resize((pred_res_hi[1], pred_res_hi[0]))) for img in pred_amodal_masks]
+                pred_amodal_masks_com = np.array(pred_amodal_masks_com).astype('uint8')
+                pred_amodal_masks_com = (pred_amodal_masks_com.sum(axis=-1) > 600).astype('uint8')
+                pred_amodal_masks_com = [keep_largest_component(pamc) for pamc in pred_amodal_masks_com]
+                # for iou
                 pred_amodal_masks = [np.array(img.resize((W, H))) for img in pred_amodal_masks]
                 pred_amodal_masks = np.array(pred_amodal_masks).astype('uint8')
                 pred_amodal_masks = (pred_amodal_masks.sum(axis=-1) > 600).astype('uint8')
                 pred_amodal_masks = [keep_largest_component(pamc) for pamc in pred_amodal_masks]    # avoid small noisy masks
-
                 # compute iou
-                ious = []
-                obj_track_list = []
                 masks = [(np.array(Image.open(bm).convert('P'))==obj_id).astype('uint8') for bm in batch_masks]
-                for a, b in zip(masks, pred_amodal_masks):
+                ious = []
+                # masks = [(np.array(Image.open(bm).convert('P'))==obj_id).astype('uint8') for bm in batch_masks]
+                masks_margin_shrink = [bm.copy() for bm in masks]
+                mask_H, mask_W = masks_margin_shrink[0].shape
+                for bi, (a, b) in enumerate(zip(masks, pred_amodal_masks)):
+                    # # mute objects near margin
+                    zero_mask_cp = np.zeros_like(masks_margin_shrink[bi])
+                    zero_mask_cp[masks_margin_shrink[bi]==1] = 255
+                    mask_binary_cp = zero_mask_cp.astype(np.uint8)
+                    mask_binary_cp[:int(mask_H*0.05), :] = mask_binary_cp[-int(mask_H*0.05):, :] = mask_binary_cp[:, :int(mask_W*0.05)] = mask_binary_cp[:, -int(mask_W*0.05):] = 0
+                    if mask_binary_cp.max() == 0:   # margin objects
+                        ious.append(1.0)
+                        continue
                     area_a = (a > 0).sum()
                     area_b = (b > 0).sum()
                     if area_a == 0 and area_b == 0:
@@ -598,27 +614,38 @@ def on_4d_generation(video_path: str):
                         obj_iou = inter / (uni + 1e-6)
                         ious.append(obj_iou)
 
-                        obj_track_list.append(bbox_from_mask(a))
+                    if i == 0 and bi == 0:
+                        if ious[0] < 0.7:
+                            obj_ratio_dict[obj_id] = bbox_from_mask(b)
+                        else:
+                            obj_ratio_dict[obj_id] = bbox_from_mask(a)
 
                 # remove fake completions (empty or from MARGINs)
-                for pi, pamc in enumerate(pred_amodal_masks):
+                for pi, pamc in enumerate(pred_amodal_masks_com):
                     # zero predictions, back to original masks
                     if masks[pi].sum() > pred_amodal_masks[pi].sum():
                         ious[pi] = 1.0
-                    elif len(obj_track_list)>0 and not are_bboxes_similar(bbox_from_mask(pamc), obj_track_list[-1]):
+                        pred_amodal_masks_com[pi] = resize_mask_with_unique_label(masks[pi], pred_res_hi[0], pred_res_hi[1], obj_id)
+                    elif len(obj_ratio_dict)>0 and not are_bboxes_similar(bbox_from_mask(pred_amodal_masks[pi]), obj_ratio_dict[obj_id]):
                         ious[pi] = 1.0
-                    elif is_super_long_or_wide(pamc, obj_id):
+                        pred_amodal_masks_com[pi] = resize_mask_with_unique_label(masks[pi], pred_res_hi[0], pred_res_hi[1], obj_id)
+                    elif is_super_long_or_wide(pred_amodal_masks[pi], obj_id):
                         ious[pi] = 1.0
-                    elif is_skinny_mask(pamc):
+                        pred_amodal_masks_com[pi] = resize_mask_with_unique_label(masks[pi], pred_res_hi[0], pred_res_hi[1], obj_id)
+                    elif is_skinny_mask(pred_amodal_masks[pi]):
                         ious[pi] = 1.0
-                    elif masks[pi].sum() == 0: # TODO: recover empty masks in future versions (to avoid severe fake completion)
-                        ious[pi] = 1.0
+                        pred_amodal_masks_com[pi] = resize_mask_with_unique_label(masks[pi], pred_res_hi[0], pred_res_hi[1], obj_id)
+                    # elif masks[pi].sum() == 0: # TODO: recover empty masks in future versions (to avoid severe fake completion)
+                    #     ious[pi] = 1.0
+                    #     pred_amodal_masks_com[pi] = resize_mask_with_unique_label(masks[pi], pred_res_hi[0], pred_res_hi[1], obj_id)
+
+                pred_amodal_masks_dict[obj_id] = pred_amodal_masks_com
 
                 # confirm occlusions & save masks (for HMR)
                 start, end = (idxs := [ix for ix,x in enumerate(ious) if x < 0.7]) and (idxs[0], idxs[-1]) or (None, None)
                 if start is not None and end is not None:
-                    start = max(0, start-2)
-                    end = min(modal_pixels[:, i:i + batch_size, :, :, :].shape[1]-1, end+2)
+                    # start = max(0, start-2)
+                    # end = min(modal_pixels[:, i:i + batch_size, :, :, :].shape[1]-1, end+2)
                     idx_dict[obj_id] = (start, end)
                     completion_path = ''.join(random.choices('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', k=4))
                     completion_image_path = f'{OUTPUT_DIR}/completion/{completion_path}/images'
@@ -626,54 +653,29 @@ def on_4d_generation(video_path: str):
                     os.makedirs(completion_image_path, exist_ok=True)
                     os.makedirs(completion_masks_path, exist_ok=True)
                     idx_path[obj_id] = {'images': completion_image_path, 'masks': completion_masks_path}
+                    # save completion masks
+                    for idx_ in range(start, end):
+                        mask_idx_ = pred_amodal_masks[idx_].copy()
+                        mask_idx_[mask_idx_ > 0] = obj_id
+                        mask_idx_ = Image.fromarray(mask_idx_).convert('P')
+                        mask_idx_.putpalette(DAVIS_PALETTE)
+                        mask_idx_.save(os.path.join(completion_masks_path, f"{idx_:08d}.png"))
 
             # completion
             for obj_id, (start, end) in idx_dict.items(): 
-
-                modal_pixels_current, ori_shape = load_and_transform_masks(OUTPUT_DIR + "/masks", resolution=pred_res_hi, obj_id=obj_id)
-                modal_pixels_current = modal_pixels_current[:, i:i + batch_size, :, :, :][:, start:end]
-                rgb_pixels_current, _, raw_rgb_pixels_current = load_and_transform_rgbs(OUTPUT_DIR + "/images", resolution=pred_res_hi)
-                rgb_pixels_current = rgb_pixels_current[:, i:i + batch_size, :, :, :][:, start:end]
-                depth_pixels_current = rgb_to_depth(rgb_pixels_current, depth_model)
-
-                # mask re-completion (with higher resolution)
-                pred_amodal_masks = pipeline_mask(
-                    modal_pixels_current,
-                    depth_pixels_current,
-                    height=pred_res_hi[0],
-                    width=pred_res_hi[1],
-                    num_frames=end-start,
-                    decode_chunk_size=8,
-                    motion_bucket_id=127,
-                    fps=8,
-                    noise_aug_strength=0.02,
-                    min_guidance_scale=1.5,
-                    max_guidance_scale=1.5,
-                    generator=generator,
-                ).frames[0]
-
-                pred_amodal_masks = np.array([np.array(img).astype('uint8') for img in pred_amodal_masks])
-                pred_amodal_masks = (pred_amodal_masks.sum(axis=-1) > 600).astype('uint8')
-                pred_amodal_masks = [keep_largest_component(pamc) for pamc in pred_amodal_masks]    # avoid small noisy masks
-
-                # save completion masks
-                completion_masks_path = idx_path[obj_id]['masks']
-                for idx_ in range(end-start):
-                    mask_idx_ = (pred_amodal_masks[idx_] > 0).astype(np.uint8)
-                    mask_idx_ = Image.fromarray(mask_idx_, 'L').resize((ori_shape[1], ori_shape[0]), Image.NEAREST)
-                    mask_idx_ = (np.array(mask_idx_) > 0).astype(np.uint8) * obj_id 
-                    mask_idx_ = Image.fromarray(mask_idx_.astype(np.uint8), 'P')
-                    mask_idx_.putpalette(DAVIS_PALETTE)
-                    mask_idx_.save(os.path.join(completion_masks_path, f"{(idx_+start):08d}.png"))
-
-                # prepare inputs
                 completion_image_path = idx_path[obj_id]['images']
-                pred_amodal_masks_current = pred_amodal_masks
+                # prepare inputs
+                modal_pixels_current, ori_shape = load_and_transform_masks(OUTPUT_DIR + "/masks", resolution=pred_res_hi, obj_id=obj_id)
+                rgb_pixels_current, _, raw_rgb_pixels_current = load_and_transform_rgbs(OUTPUT_DIR + "/images", resolution=pred_res_hi)
+                modal_pixels_current = modal_pixels_current[:, i:i + batch_size, :, :, :]
+                modal_pixels_current = modal_pixels_current[:, start:end]
+                pred_amodal_masks_current = pred_amodal_masks_dict[obj_id][start:end]
                 modal_mask_union = (modal_pixels_current[0, :, 0, :, :].cpu().numpy() > 0).astype('uint8')
                 pred_amodal_masks_current = np.logical_or(pred_amodal_masks_current, modal_mask_union).astype('uint8')
                 pred_amodal_masks_tensor = torch.from_numpy(np.where(pred_amodal_masks_current == 0, -1, 1)).float().unsqueeze(0).unsqueeze(
                     2).repeat(1, 1, 3, 1, 1)
 
+                rgb_pixels_current = rgb_pixels_current[:, i:i + batch_size, :, :, :][:, start:end]
                 modal_obj_mask = (modal_pixels_current > 0).float()
                 modal_background = 1 - modal_obj_mask
                 rgb_pixels_current = (rgb_pixels_current + 1) / 2

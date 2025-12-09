@@ -144,7 +144,7 @@ def bbox_from_mask(mask):
 
 
 def are_bboxes_similar(bbox1, bbox2,
-                       size_ratio_thresh=1,
+                       size_ratio_thresh=0.2,
                        center_ratio_thresh=4):
     """
     Check whether two bboxes are similar.
@@ -166,12 +166,12 @@ def are_bboxes_similar(bbox1, bbox2,
     cx2, cy2, w2, h2 = bbox2
 
     # --- 1) Size similarity (primary) ---
-    # Relative difference for width/height, smaller is more similar.
-    w_diff = abs(w1 - w2) / max(w1, w2)
-    h_diff = abs(h1 - h2) / max(h1, h2)
+    ratio1 = max(w1, h1) / (min(w1, h1) + 1e-6)
+    ratio2 = max(w2, h2) / (min(w2, h2) + 1e-6)
 
-    if w_diff > size_ratio_thresh or h_diff > size_ratio_thresh:
-        # Sizes are too different → not similar
+    ratio_diff = abs(ratio1 - ratio2) / max(ratio1, ratio2)
+
+    if ratio_diff > size_ratio_thresh:
         return False
 
     # --- 2) Center similarity (secondary) ---

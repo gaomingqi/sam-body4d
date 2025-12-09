@@ -29,7 +29,7 @@ from ..modules.transformer import FFN, MLP
 
 from .base_model import BaseModel
 
-from utils import kalman_smooth_mhr_params_multi_human_with_ids, smooth_scale_shape_local
+from utils import kalman_smooth_mhr_params_per_obj_id_adaptive, smooth_scale_shape_local, ema_smooth_global_rot_per_obj_id_adaptive
 
 
 logger = get_pylogger(__name__)
@@ -2120,13 +2120,15 @@ class SAM3DBody(BaseModel):
         # Re-run forward
         with torch.no_grad():
 
-            # # # smooth before generating mesh parameters
-            kalman_cfg = {
-                "body_pose": dict(q_pos=5e-4, q_vel=3e-4, r_obs=8e-2),
-                "hand":      dict(q_pos=4e-4, q_vel=4e-4, r_obs=1.2e-1),
-            }
+            # # # # smooth before generating mesh parameters
+            # kalman_cfg = {
+            #     "body_pose": dict(q_pos=5e-4, q_vel=3e-4, r_obs=8e-2),
+            #     "hand":      dict(q_pos=4e-4, q_vel=4e-4, r_obs=1.2e-1),
+            # }
 
-            pose_output["mhr"] = kalman_smooth_mhr_params_multi_human_with_ids(
+            # -----------------
+            # smooth body pose & hand
+            pose_output["mhr"] = kalman_smooth_mhr_params_per_obj_id_adaptive(
                 pose_output["mhr"],
                 num_frames=len(img_list),
                 frame_obj_ids=id_batch,
@@ -2134,13 +2136,14 @@ class SAM3DBody(BaseModel):
                 kalman_cfg=kalman_cfg,
             )
 
+            # -----------------
+            # keep shape & scale same as the first frame
             num_human = pose_output["mhr"]["shape"].shape[0] // len(img_list)
             scale = pose_output["mhr"]["scale"]  # shape: (B, 28)
             shape = pose_output["mhr"]["shape"]  # shape: (B, 45)
             B, D_scale = scale.shape
             _, D_shape = shape.shape
             num_frames = len(img_list)
-            # B = num_frames * num_human
             # Reshape to (T, N, D) so that we can index by (frame, human)
             scale_3d = scale.view(num_frames, num_human, D_scale)   # (T, N, 28)
             shape_3d = shape.view(num_frames, num_human, D_shape)   # (T, N, 45)
@@ -2157,10 +2160,22 @@ class SAM3DBody(BaseModel):
                 # Broadcast to all time steps for this human
                 scale_3d[:, hid, :] = first_scale
                 shape_3d[:, hid, :] = first_shape
-
             # Back to original shape: (B, D)
             pose_output["mhr"]["scale"] = scale_3d.view(B, D_scale)
             pose_output["mhr"]["shape"] = shape_3d.view(B, D_shape)
+
+            # -----------------
+            # smooth global rot
+            pose_output["mhr"] = ema_smooth_global_rot_per_obj_id_adaptive(
+                mhr_dict=pose_output["mhr"],
+                num_frames=len(img_list),
+                frame_obj_ids=id_batch,
+                key_name="global_rot",
+                alpha_strong=0.1,   # heavy smooth
+                alpha_weak=0.3,     # tiny smooth
+                motion_low=0.05,    # threshold to static
+                motion_high=0.30,   # do not smooth over this
+            )
 
             verts, j3d, jcoords, mhr_model_params, joint_global_rots = (
                 self.head_pose.mhr_forward(

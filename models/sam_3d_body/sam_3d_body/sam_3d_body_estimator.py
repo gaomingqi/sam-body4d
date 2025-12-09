@@ -167,10 +167,23 @@ class SAM3DBodyEstimator:
 
         #################### Construct batch data samples ####################
             if len(boxes) < max_N:  # padding if no objects detected
-                pad = max_N - len(boxes)
-                boxes = np.concatenate([boxes, np.repeat(boxes[-1][None, :], pad, axis=0)], axis=0)
-                masks_binary = np.concatenate([masks_binary, np.repeat(masks_binary[-1][None, :], pad, axis=0)], axis=0)
-
+                padding_box = boxes[0]
+                padding_mask = masks_binary[0]
+                boxes_to_cat = []
+                masks_to_cat = []
+                current_id_batch = id_batch[i]
+                cid = 0
+                for current_id in range(max_N):
+                    if (current_id+1) in current_id_batch:
+                        boxes_to_cat.append(boxes[cid])
+                        masks_to_cat.append(masks_binary[cid])
+                        cid += 1
+                    else:
+                        boxes_to_cat.append(padding_box)
+                        masks_to_cat.append(padding_mask)
+                boxes = np.stack(boxes_to_cat, axis=0)
+                masks_binary = np.stack(masks_to_cat, axis=0)
+                # e.g., 1 2 4 5 6 -> 1 2 [1] 4 5 6
             img_com_dict = {}
             for idx_k, (idx_start,idx_end) in idx_dict.items():
                 if i >= idx_start and i < idx_end:

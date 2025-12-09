@@ -1,5 +1,104 @@
-import torch
 import numpy as np
+import torch
+
+
+def ema_smooth_global_rot_per_obj_id_adaptive(
+    mhr_dict,
+    num_frames,
+    frame_obj_ids,
+    key_name="global_rot",
+    alpha_strong=0.1,
+    alpha_weak=0.3,
+    motion_low=0.05,
+    motion_high=0.30,
+    empty_thresh=1e-6,
+):
+    """
+    Adaptive EMA smoothing for mhr_dict[key_name] (B, 3), per obj_id.
+
+    - B = num_frames * num_humans
+    - Flatten order: frame 0: slots 0..N-1, frame 1: slots 0..N-1, ...
+    - obj_id starts from 1, slot index = obj_id - 1.
+    - For each obj_id:
+        * collect its valid frames (where obj_id appears in frame_obj_ids[t])
+        * compute overall motion_level on this track
+        * if motion_level < motion_low  -> strong smoothing (alpha_strong)
+          motion_low <= motion_level < motion_high -> weak smoothing (alpha_weak)
+          motion_level >= motion_high -> skip (do NOT smooth this human)
+    - Missing frames keep original values.
+    """
+    if key_name not in mhr_dict:
+        return mhr_dict
+
+    rot = mhr_dict[key_name]  # shape: (B, 3)
+    device = rot.device
+    B, D = rot.shape
+    if D != 3:
+        # Not the expected shape, just return as is.
+        return mhr_dict
+
+    # Infer num_humans
+    any_key = next(iter(mhr_dict.keys()))
+    B_check = mhr_dict[any_key].shape[0]
+    assert B_check == B, "Inconsistent B in mhr_dict"
+    assert B % num_frames == 0, "B must be divisible by num_frames"
+    num_humans = B // num_frames
+
+    assert len(frame_obj_ids) == num_frames, "frame_obj_ids length must equal num_frames"
+
+    rot_np = rot.detach().cpu().numpy()  # (B, 3)
+
+    for obj_id in range(1, num_humans + 1):
+        slot = obj_id - 1  # slot index in [0, num_humans)
+
+        # Collect all indices where this obj_id is present
+        valid_indices = []
+        for t in range(num_frames):
+            if obj_id in frame_obj_ids[t]:
+                idx = t * num_humans + slot
+                valid_indices.append(idx)
+
+        if len(valid_indices) == 0:
+            continue
+
+        track = rot_np[valid_indices, :]  # (T_valid, 3)
+
+        # Skip empty tracks
+        if np.linalg.norm(track) < empty_thresh:
+            continue
+
+        T_valid = track.shape[0]
+        if T_valid <= 1:
+            continue
+
+        # Compute overall motion level for this human:
+        # median L2 difference between consecutive frames
+        diff = np.linalg.norm(track[1:] - track[:-1], axis=1)  # (T_valid-1,)
+        motion_level = float(np.median(diff))
+
+        # Decide smoothing strength based on motion_level
+        if motion_level < motion_low:
+            alpha = alpha_strong   # very strong smoothing (almost static)
+        elif motion_level < motion_high:
+            alpha = alpha_weak     # mild smoothing
+        else:
+            # This human is highly dynamic → do NOT smooth
+            continue
+
+        # EMA smoothing on this track
+        smooth = np.zeros_like(track, dtype=np.float32)
+        smooth[0] = track[0]
+        for i in range(1, T_valid):
+            smooth[i] = alpha * track[i] + (1.0 - alpha) * smooth[i - 1]
+
+        if not np.isfinite(smooth).all():
+            continue
+
+        rot_np[valid_indices, :] = smooth
+
+    mhr_dict[key_name] = torch.from_numpy(rot_np).to(device)
+    return mhr_dict
+
 
 def kalman_smooth_constant_velocity_safe(Y, q_pos=1e-4, q_vel=1e-6, r_obs=1e-2):
     """
@@ -76,54 +175,132 @@ def kalman_smooth_constant_velocity_safe(Y, q_pos=1e-4, q_vel=1e-6, r_obs=1e-2):
     X = np.nan_to_num(X, nan=0.0, posinf=max_val, neginf=-max_val)
     return X
 
-import torch
 
-def kalman_smooth_mhr_params_multi_human_with_ids(
+def adaptive_strong_smoothing(
+    track_valid,
+    strong_q_pos=1e-6,
+    strong_q_vel=1e-7,
+    strong_r_obs=1.0,
+    motion_low=0.01,
+    motion_high=0.1,
+    noise_raw_scale=0.1,
+    min_stable_len=3,
+):
+    """
+    General adaptive smoothing used by kalman_smooth_mhr_params_per_obj_id_adaptive.
+
+    Behavior:
+      - Always:
+          1) Run VERY strong Kalman to get 'heavy' track.
+          2) Compute motion_raw = |raw[t] - raw[t-1]|.
+          3) Base weight w_raw from motion_raw:
+               small motion -> trust heavy more
+               large motion -> trust raw more
+      - Additionally (occlusion case only):
+          * If motion pattern is "stable -> burst -> stable", detected on motion_raw,
+            then in the middle burst segment shrink w_raw (treat as occlusion noise).
+          * If motion is always high / no stable prefix & suffix, we do NOT
+            add extra suppression (treated as real motion).
+    """
+    track_valid = np.asarray(track_valid, dtype=np.float32)
+    T, D = track_valid.shape
+    if T <= 1:
+        return track_valid.copy()
+
+    # 1) Heavy-smoothed version using very strong Kalman
+    heavy = kalman_smooth_constant_velocity_safe(
+        track_valid,
+        q_pos=strong_q_pos,
+        q_vel=strong_q_vel,
+        r_obs=strong_r_obs,
+    )
+
+    # 2) Motion magnitude on raw track
+    diff_raw = np.linalg.norm(track_valid[1:] - track_valid[:-1], axis=1)  # (T-1,)
+    motion_raw = np.concatenate(([diff_raw[0]], diff_raw))                 # (T,)
+
+    # 3) Base w_raw from motion_raw (small motion → trust heavy, large motion → trust raw)
+    denom = max(motion_high - motion_low, 1e-8)
+    w_raw = (motion_raw - motion_low) / denom
+    w_raw = np.clip(w_raw, 0.0, 1.0)      # (T,)
+    w_raw = w_raw[:, None]                # (T, 1)
+
+    # ---------- Detect "stable -> burst -> stable" pattern on motion_raw ----------
+    low_th = motion_low
+    high_th = motion_high
+
+    high_mask = motion_raw > high_th
+    if high_mask.any():
+        # first and last indices where motion is high
+        t_start = int(high_mask.argmax())
+        t_end = int(len(motion_raw) - 1 - high_mask[::-1].argmax())
+        if t_end > t_start:
+            prefix = motion_raw[:t_start]
+            suffix = motion_raw[t_end+1:]
+
+            # Require both prefix and suffix to be long enough
+            if len(prefix) >= min_stable_len and len(suffix) >= min_stable_len:
+                prefix_stable_ratio = (prefix < low_th).mean() if len(prefix) > 0 else 0.0
+                suffix_stable_ratio = (suffix < low_th).mean() if len(suffix) > 0 else 0.0
+                mid = motion_raw[t_start:t_end+1]
+                mid_high_ratio = (mid > high_th).mean() if len(mid) > 0 else 0.0
+
+                # Occlusion-like pattern: stable → burst → stable
+                if prefix_stable_ratio > 0.7 and suffix_stable_ratio > 0.7 and mid_high_ratio > 0.7:
+                    # In the burst segment, strongly pull toward heavy (occlusion suppression)
+                    w_raw[t_start:t_end+1, :] *= noise_raw_scale
+
+    # 4) Final adaptive blend
+    out = w_raw * track_valid + (1.0 - w_raw) * heavy
+    return out
+
+
+def kalman_smooth_mhr_params_per_obj_id_adaptive(
     mhr_dict,
     num_frames,
     frame_obj_ids,
     keys_to_smooth=None,
-    kalman_cfg=None,
+    kalman_cfg=None,   # kept for API compatibility, not strictly used here
     empty_thresh=1e-6,
 ):
     """
-    Apply Kalman smoothing per obj_id, using only frames where this obj_id exists.
+    General per-obj_id adaptive smoothing with occlusion awareness.
+
+    Interface is unchanged.
 
     Data layout (unchanged):
-        - mhr_dict[key]: (B, D), B = num_frames * num_humans
-        - Flatten order in B:
-              frame 0: slots 0..num_humans-1
-              frame 1: slots 0..num_humans-1
-              ...
-        - slot index s in [0, num_humans) corresponds to obj_id = s + 1.
+      - mhr_dict[key]: (B, D), B = num_frames * num_humans
+      - Flatten order in B:
+            frame 0: slots 0..num_humans-1
+            frame 1: slots 0..num_humans-1
+            ...
+      - slot index s in [0, num_humans) corresponds to obj_id = s + 1.
 
     frame_obj_ids:
-        - list of length num_frames
-        - frame_obj_ids[t] is a list of obj_id (1-based) present in frame t
+      - list of length num_frames
+      - frame_obj_ids[t] is a list of obj_id (1-based) present in frame t
 
-    Behavior:
-        - For each key in keys_to_smooth and each obj_id:
-            * Build the list of (frame, B_index) where this obj_id exists.
-            * Extract these rows as a track Y_valid of shape (T_valid, D).
-            * Run Kalman on Y_valid (only valid frames are history).
-            * Write smoothed values back only to those B_indices.
-        - Missing frames for this obj_id are never used as Kalman history
-          and keep their original values in mhr_dict.
+    Behavior (per key, per obj_id):
+      - Collect all valid_indices in B where this obj_id exists.
+      - Extract track_valid (T_valid, D) from those indices.
+      - Run adaptive_strong_smoothing on track_valid:
+          * automatically decides:
+              - normal case: general adaptive smoothing
+              - occlusion-like "stable -> burst -> stable" pattern:
+                    extra suppression in burst segment
+      - Write smoothed values back ONLY to valid_indices.
+      - Missing frames are not used as history and are not overwritten.
     """
     if keys_to_smooth is None:
         keys_to_smooth = ["body_pose", "hand"]
 
     if kalman_cfg is None:
-        kalman_cfg = {
-            "body_pose": dict(q_pos=5e-4, q_vel=3e-4, r_obs=8e-2),
-            "hand":      dict(q_pos=4e-4, q_vel=4e-4, r_obs=1.2e-1),
-        }
+        kalman_cfg = {}
 
     assert len(frame_obj_ids) == num_frames, "frame_obj_ids length must equal num_frames"
 
     new_mhr = {}
 
-    # Infer B and num_humans
     any_key = next(iter(mhr_dict.keys()))
     B = mhr_dict[any_key].shape[0]
     assert B % num_frames == 0, "B must be divisible by num_frames"
@@ -131,11 +308,23 @@ def kalman_smooth_mhr_params_multi_human_with_ids(
 
     for k, v in mhr_dict.items():
         if k in keys_to_smooth:
-            cfg = kalman_cfg.get(k, kalman_cfg.get("body_pose"))
             device = v.device
             B, D = v.shape
-
             v_np = v.detach().cpu().numpy()  # (B, D)
+
+            # Optional: customize hyper-params per key
+            if k == "body_pose":
+                strong_q_pos, strong_q_vel, strong_r_obs = 1e-6, 1e-7, 3.0  # 超强 heavy
+                motion_low, motion_high = 0.10, 0.20  # 远高于原先
+                noise_raw_scale = 0.02  # 几乎彻底压回 heavy
+            elif k == "hand":
+                strong_q_pos, strong_q_vel, strong_r_obs = 1e-6, 1e-7, 3.0
+                motion_low, motion_high = 0.12, 0.25  # 手更宽松一点
+                noise_raw_scale = 0.02
+            else:
+                strong_q_pos, strong_q_vel, strong_r_obs = 1e-6, 1e-7, 3.0
+                motion_low, motion_high = 0.10, 0.22
+                noise_raw_scale = 0.02
 
             # Loop over obj_id = 1..num_humans
             for obj_id in range(1, num_humans + 1):
@@ -145,33 +334,36 @@ def kalman_smooth_mhr_params_multi_human_with_ids(
                 valid_indices = []
                 for t in range(num_frames):
                     if obj_id in frame_obj_ids[t]:
-                        # B index = t * num_humans + slot
                         idx = t * num_humans + slot
                         valid_indices.append(idx)
 
-                # If this obj_id never appears, skip
+                # No valid frames for this obj_id → skip
                 if len(valid_indices) == 0:
                     continue
 
                 track_valid = v_np[valid_indices, :]  # (T_valid, D)
 
-                # Skip almost-empty tracks
+                # Skip almost-empty tracks (e.g., all zeros)
                 if np.linalg.norm(track_valid) < empty_thresh:
                     continue
 
-                # Run Kalman only on valid frames for this obj_id
-                smoothed_valid = kalman_smooth_constant_velocity_safe(
+                # General adaptive smoothing (auto decides if occlusion-like)
+                smoothed_valid = adaptive_strong_smoothing(
                     track_valid,
-                    q_pos=cfg["q_pos"],
-                    q_vel=cfg["q_vel"],
-                    r_obs=cfg["r_obs"],
+                    strong_q_pos=strong_q_pos,
+                    strong_q_vel=strong_q_vel,
+                    strong_r_obs=strong_r_obs,
+                    motion_low=motion_low,
+                    motion_high=motion_high,
+                    noise_raw_scale=noise_raw_scale,
+                    min_stable_len=3,
                 )
 
-                # If something went wrong, keep original
+                # Safety: if anything goes wrong, keep original
                 if not np.isfinite(smoothed_valid).all():
                     continue
 
-                # Write smoothed values back to those valid indices
+                # Write smoothed values back ONLY to valid indices
                 v_np[valid_indices, :] = smoothed_valid
 
             new_mhr[k] = torch.from_numpy(v_np).to(device)
@@ -181,7 +373,6 @@ def kalman_smooth_mhr_params_multi_human_with_ids(
 
     return new_mhr
 
-import numpy as np
 
 def local_window_smooth(Y, window=9, weights=None):
     """
@@ -227,8 +418,6 @@ def local_window_smooth(Y, window=9, weights=None):
 
     return out
 
-
-import torch
 
 def smooth_scale_shape_local(mhr, num_frames, window=9,
                              vis_scale=None, vis_shape=None):
