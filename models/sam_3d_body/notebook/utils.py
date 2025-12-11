@@ -15,6 +15,8 @@ from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
 from sam_3d_body.visualization.renderer import Renderer
 from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 
+from utils.painter import color_list
+
 from PIL import Image
 
 LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
@@ -209,76 +211,24 @@ def visualize_3d_mesh(
 
 
 def save_mesh_results(
-    img_cv2: np.ndarray,
     outputs: List[Dict[str, Any]],
     faces: np.ndarray,
     save_dir: str,
-    image_name: str,
-) -> List[str]:
+    image_path: str,
+    id_current: List,
+):
     """Save 3D mesh results to files and return PLY file paths"""
-    import json
-
-    os.makedirs(save_dir, exist_ok=True)
-    ply_files = []
-
-    # Save focal length
-    if outputs:
-        focal_length_data = {"focal_length": float(outputs[0]["focal_length"])}
-        focal_length_path = os.path.join(save_dir, f"{image_name}_focal_length.json")
-        with open(focal_length_path, "w") as f:
-            json.dump(focal_length_data, f, indent=2)
-        print(f"Saved focal length: {focal_length_path}")
-
-    image_mesh = img_cv2.copy()
-    image_bbox = img_cv2.copy()
     for pid, person_output in enumerate(outputs):
         # Create renderer for this person
         renderer = Renderer(focal_length=person_output["focal_length"], faces=faces)
 
         # Store individual mesh
+        color = tuple(c / 255.0 for c in color_list[id_current[pid]+4])
         tmesh = renderer.vertices_to_trimesh(
-            person_output["pred_vertices"], person_output["pred_cam_t"], LIGHT_BLUE
+            person_output["pred_vertices"], person_output["pred_cam_t"], color
         )
-        mesh_filename = f"{image_name}_mesh_{pid:03d}.ply"
-        mesh_path = os.path.join(save_dir, mesh_filename)
+        mesh_path = f"{save_dir}/{pid+1}/{os.path.basename(image_path)[:-4]}.ply"
         tmesh.export(mesh_path)
-        ply_files.append(mesh_path)
-
-        # Save individual overlay image
-        img_mesh_overlay = (
-            renderer(
-                person_output["pred_vertices"],
-                person_output["pred_cam_t"],
-                image_mesh.copy(),
-                mesh_base_color=LIGHT_BLUE,
-                scene_bg_color=(1, 1, 1),
-            )
-            * 255
-        ).astype(np.uint8)
-
-        overlay_filename = f"{image_name}_overlay_{pid:03d}.png"
-        cv2.imwrite(os.path.join(save_dir, overlay_filename), img_mesh_overlay)
-        image_mesh = img_mesh_overlay
-
-        # Save bbox image
-        img_bbox = image_bbox.copy()
-        bbox = person_output["bbox"]
-        img_bbox = cv2.rectangle(
-            img_bbox,
-            (int(bbox[0]), int(bbox[1])),
-            (int(bbox[2]), int(bbox[3])),
-            (0, 255, 0),
-            4,
-        )
-        image_bbox = img_bbox
-        bbox_filename = f"{image_name}_bbox_{pid:03d}.png"
-        cv2.imwrite(os.path.join(save_dir, bbox_filename), img_bbox)
-
-        print(f"Saved mesh: {mesh_path}")
-        print(f"Saved overlay: {os.path.join(save_dir, overlay_filename)}")
-        print(f"Saved bbox: {os.path.join(save_dir, bbox_filename)}")
-
-    return ply_files
 
 
 def display_results_grid(

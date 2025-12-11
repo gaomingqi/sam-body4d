@@ -23,7 +23,7 @@ sys.path.append(os.path.join(current_dir, 'models', 'diffusion_vas'))
 from utils import draw_point_marker, mask_painter, images_to_mp4, DAVIS_PALETTE, jpg_folder_to_mp4, is_super_long_or_wide, keep_largest_component, is_skinny_mask, bbox_from_mask, gpu_profile, resize_mask_with_unique_label
 
 from models.sam_3d_body.sam_3d_body import load_sam_3d_body, SAM3DBodyEstimator
-from models.sam_3d_body.notebook.utils import process_image_with_mask
+from models.sam_3d_body.notebook.utils import process_image_with_mask, save_mesh_results
 from models.sam_3d_body.tools.vis_utils import visualize_sample_together, visualize_sample
 from models.diffusion_vas.demo import init_amodal_segmentation_model, init_rgb_model, init_depth_model, load_and_transform_masks, load_and_transform_rgbs, rgb_to_depth
 
@@ -519,8 +519,11 @@ def on_4d_generation(video_path: str):
         ]
     )
 
-    os.makedirs(f"{OUTPUT_DIR}/mask_4d", exist_ok=True)
-    os.makedirs(f"{OUTPUT_DIR}/mask_4d_individual", exist_ok=True)
+    os.makedirs(f"{OUTPUT_DIR}/rendered_frames", exist_ok=True)
+    for obj_id in RUNTIME['out_obj_ids']:
+        os.makedirs(f"{OUTPUT_DIR}/mesh_4d_individual/{obj_id}", exist_ok=True)
+        os.makedirs(f"{OUTPUT_DIR}/rendered_frames_individual/{obj_id}", exist_ok=True)
+
     batch_size = RUNTIME['batch_size']
     n = len(images_list)
     
@@ -719,18 +722,27 @@ def on_4d_generation(video_path: str):
             img = cv2.imread(image_path)
             rend_img = visualize_sample_together(img, mask_output, sam3_3d_body_model.faces, id_current)
             cv2.imwrite(
-                f"{OUTPUT_DIR}/mask_4d/{os.path.basename(image_path)[:-4]}.jpg",
+                f"{OUTPUT_DIR}/rendered_frames/{os.path.basename(image_path)[:-4]}.jpg",
                 rend_img.astype(np.uint8),
             )
+            # save rendered frames for individual person
             rend_img_list = visualize_sample(img, mask_output, sam3_3d_body_model.faces, id_current)
             for ri, rend_img in enumerate(rend_img_list):
                 cv2.imwrite(
-                    f"{OUTPUT_DIR}/mask_4d_individual/{os.path.basename(image_path)[:-4]}_{ri+1}.jpg",
+                    f"{OUTPUT_DIR}/rendered_frames_individual/{ri+1}/{os.path.basename(image_path)[:-4]}_{ri+1}.jpg",
                     rend_img.astype(np.uint8),
                 )
+            # save mesh for individual person
+            save_mesh_results(
+                outputs=mask_output, 
+                faces=sam3_3d_body_model.faces, 
+                save_dir=f"{OUTPUT_DIR}/mesh_4d_individual",
+                image_path=image_path,
+                id_current=id_current,
+            )
 
     out_4d_path = os.path.join(OUTPUT_DIR, f"4d_{time.time():.0f}.mp4")
-    jpg_folder_to_mp4(f"{OUTPUT_DIR}/mask_4d", out_4d_path, fps=RUNTIME['video_fps'])
+    jpg_folder_to_mp4(f"{OUTPUT_DIR}/rendered_frames", out_4d_path, fps=RUNTIME['video_fps'])
 
     return out_4d_path
 
