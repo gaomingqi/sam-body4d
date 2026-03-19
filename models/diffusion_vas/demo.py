@@ -121,7 +121,7 @@ def load_and_transform_rgbs(image_folder, resolution=(512, 1024)):
 
     rgb_tensor = torch.stack(transformed_frames).unsqueeze(0)
 
-    return rgb_tensor, original_size, np.array(raw_images)
+    return rgb_tensor, original_size, np.array([cv2.resize(img, (original_size[1], original_size[0])) if img.shape[:2] != tuple(original_size) else img for img in raw_images])
 
 
 def rgb_to_depth(rgb_tensor, depth_model):
