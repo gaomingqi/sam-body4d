@@ -167,7 +167,17 @@ class SAM3DBodyEstimator:
                 assert (
                     bboxes[i] is not None
                 ), "Mask-conditioned inference requires bboxes input!"
-                masks_binary = masks[i].reshape(-1, height, width, 1).astype(np.uint8)
+                mask_i = masks[i]
+                mask_h, mask_w = mask_i.shape[-2], mask_i.shape[-1]
+                if mask_h != height or mask_w != width:
+                    if mask_i.ndim == 2:
+                        mask_i = cv2.resize(mask_i, (width, height), interpolation=cv2.INTER_NEAREST)
+                    else:
+                        mask_i = np.stack([
+                            cv2.resize(m, (width, height), interpolation=cv2.INTER_NEAREST)
+                            for m in mask_i
+                        ])
+                masks_binary = mask_i.reshape(-1, height, width, 1).astype(np.uint8)
                 masks_score = np.ones(
                     len(masks), dtype=np.float32
                 )  # Set high confidence for provided masks
