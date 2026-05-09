@@ -1,6 +1,7 @@
 import argparse
 import glob
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -33,6 +34,29 @@ from models.sam_3d_body.tools.build_detector import HumanDetector
 DEFAULT_VOCCL3D_ROOT = "/home/mingqi/data/datasets/hmr/VOccl3D/scene9_view1"
 DEFAULT_OUTPUT_DIR = "/home/mingqi/data/predictions/hmr/VOccl3D/scene9_view1"
 DEFAULT_CONFIG_PATH = os.path.join(REPO_DIR, "configs", "body4d.yaml")
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def configure_library_logging(level):
+    level = str(level).upper()
+    if level not in LOG_LEVELS:
+        raise ValueError(f"Unsupported log level: {level}")
+    os.environ["LOG_LEVEL"] = level
+
+    numeric_level = getattr(logging, level)
+    logging.getLogger().setLevel(numeric_level)
+    for name in (
+        "sam3",
+        "sam3.model",
+        "sam3.model.sam3_video_predictor",
+        "sam3.model.sam3_video_inference",
+        "sam3.model.sam3_video_base",
+        "mhr_smpl_conversion",
+    ):
+        logger = logging.getLogger(name)
+        logger.setLevel(numeric_level)
+        for handler in logger.handlers:
+            handler.setLevel(numeric_level)
 
 
 def list_sequences(voccl3d_root):
@@ -669,6 +693,8 @@ def build_worker_command(args, seq_names, worker_id):
         args.box_fallback,
         "--preferred_sam_id",
         str(args.preferred_sam_id),
+        "--library_log_level",
+        args.library_log_level,
         "--worker_id",
         str(worker_id),
     ]
@@ -755,6 +781,7 @@ def launch_multi_gpu(args):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
         env["PYTHONUNBUFFERED"] = "1"
+        env["LOG_LEVEL"] = args.library_log_level
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         cmd = build_worker_command(args, seq_names, worker_id)
         log_f = None if stream_to_terminal else open(log_path, "w")
@@ -932,8 +959,16 @@ def main():
         default="0",
         help="Multi-GPU: stream this GPU worker to terminal for tqdm progress; use none to log every worker.",
     )
+    parser.add_argument(
+        "--library_log_level",
+        type=str.upper,
+        choices=LOG_LEVELS,
+        default="WARNING",
+        help="Suppress noisy library logs by default; WARNING keeps tqdm clean while preserving warnings/errors.",
+    )
     parser.add_argument("--worker_id", type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    configure_library_logging(args.library_log_level)
 
     if args.multi_gpu:
         launch_multi_gpu(args)
