@@ -642,7 +642,7 @@ def process_image_with_bbox(estimator, image_path: str, bboxes, idx_path, idx_di
     # load in batches
     image_batch = []
     bbox_batch = []
-    kps_batch = []
+    kps_batch = None if batch_kps is None else []
     n = len(image_path)
     id_batch = []
     empty_frame_list = []

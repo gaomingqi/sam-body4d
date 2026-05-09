@@ -8,7 +8,7 @@
 
 paths:
   # Set your global checkpoint root directory here
-  ckpt_root: "/home/data/hmq/checkpoints/sam-body4d"
+  ckpt_root: "/home/mingqi/data/checkpoints/hmr"
 
 sam3:
   # download: https://huggingface.co/facebook/sam3

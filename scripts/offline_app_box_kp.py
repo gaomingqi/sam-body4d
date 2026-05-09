@@ -106,10 +106,18 @@ def build_diffusion_vas_config(cfg):
 
 
 class offline_app:
-    def __init__(self, config_path: str = os.path.join(ROOT, "configs", "body4d.yaml"), refine_occlusion=False):
+    def __init__(
+        self,
+        config_path: str = os.path.join(ROOT, "configs", "body4d.yaml"),
+        refine_occlusion=False,
+        load_sam3=True,
+    ):
         """Initialize CONFIG, SAM3_MODEL, and global RUNTIME dict."""
         self.CONFIG = OmegaConf.load(config_path)
-        self.sam3_model, self.predictor = build_sam3_from_config(self.CONFIG)
+        if load_sam3:
+            self.sam3_model, self.predictor = build_sam3_from_config(self.CONFIG)
+        else:
+            self.sam3_model, self.predictor = None, None
         self.sam3_3d_body_model = build_sam3_3d_body_config(self.CONFIG)
 
         # reproduced SAM-3D-Body inference
@@ -125,7 +133,7 @@ class offline_app:
         self.RUNTIME['bboxes'] = None
         self.RUNTIME['kps'] = None
 
-    def on_4d_generation(self, images_list, box_list, kps_list=None, flip=False):
+    def on_4d_generation(self, images_list, box_list, kps_list=None, flip=False, render=True):
         """
         Placeholder for 4D generation.
         Later:
@@ -135,7 +143,7 @@ class offline_app:
         """
         os.makedirs(f"{self.OUTPUT_DIR}/rendered_frames", exist_ok=True)
         os.makedirs(f"{self.OUTPUT_DIR}/mhr_params", exist_ok=True)
-        for obj_id in range(len(box_list[0])):
+        for obj_id in range(len(box_list)):
             os.makedirs(f"{self.OUTPUT_DIR}/mesh_4d_individual/{obj_id+1}", exist_ok=True)
             os.makedirs(f"{self.OUTPUT_DIR}/rendered_frames_individual/{obj_id+1}", exist_ok=True)
 
@@ -155,7 +163,7 @@ class offline_app:
             idx_path = {}
             occ_dict = {}
 
-            for obj_id in range(len(box_list[0])):
+            for obj_id in range(len(box_list)):
                 occ_dict[obj_id+1] = [1] * len(batch_images)
 
             batch_boxes = [bboxes[i:i + batch_size] for bboxes in box_list]
@@ -175,25 +183,25 @@ class offline_app:
                     mask_output = mask_outputs[frame_id-num_empth_ids]
                     id_current = id_batch[frame_id-num_empth_ids]
                 
-                # comment for faster inference
-                img = cv2.imread(image_path)
-                rend_img = visualize_sample_together(img, mask_output, self.sam3_3d_body_model.faces, id_current)
-                out = rend_img.copy()
-                for boxi in range(len(mask_output)):
-                    x1, y1, x2, y2 = batch_boxes[boxi][frame_id]
-                    out = out.copy()
-                    color = [(0, 165, 255), (0, 255, 255)][boxi]
-                    cv2.rectangle(
-                        out,
-                        (int(x1.item()), int(y1.item())),
-                        (int(x2.item()), int(y2.item())),
-                        color=color,  # BGR
-                        thickness=3
+                if render and mask_output is not None:
+                    img = cv2.imread(image_path)
+                    rend_img = visualize_sample_together(img, mask_output, self.sam3_3d_body_model.faces, id_current)
+                    out = rend_img.copy()
+                    colors = [(0, 165, 255), (0, 255, 255), (255, 128, 0), (255, 0, 255)]
+                    for boxi in range(len(mask_output)):
+                        x1, y1, x2, y2 = batch_boxes[boxi][frame_id]
+                        out = out.copy()
+                        cv2.rectangle(
+                            out,
+                            (int(x1.item()), int(y1.item())),
+                            (int(x2.item()), int(y2.item())),
+                            color=colors[boxi % len(colors)],
+                            thickness=3
+                        )
+                    cv2.imwrite(
+                        f"{self.OUTPUT_DIR}/rendered_frames/{os.path.basename(image_path)[:-4]}.jpg",
+                        out.astype(np.uint8),
                     )
-                cv2.imwrite(
-                    f"{self.OUTPUT_DIR}/rendered_frames/{os.path.basename(image_path)[:-4]}.jpg",
-                    out.astype(np.uint8),
-                )
 
                 np.savez_compressed(f"{self.OUTPUT_DIR}/mhr_params/{os.path.basename(image_path)[:-4]}_data.npz", data=mask_output)
                 np.savez_compressed(f"{self.OUTPUT_DIR}/mhr_params/{os.path.basename(image_path)[:-4]}_id.npz", data=id_current)

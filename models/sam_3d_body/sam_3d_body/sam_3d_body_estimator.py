@@ -214,12 +214,20 @@ class SAM3DBodyEstimator:
                 masks_score = None
 
             if kps_batch is not None:
-                if len(kps_batch[i].shape) == 2:
-                    batch = prepare_batch(img, self.transform, boxes, masks_binary, masks_score, img_com_dict=img_com_dict, kps=np.expand_dims(kps_batch[i], axis=0))
-                    kp3 = np.expand_dims(kps_batch[i], axis=0)[:, :, 2:3]
+                cur_kps = np.expand_dims(kps_batch[i], axis=0) if len(kps_batch[i].shape) == 2 else kps_batch[i]
+                batch = prepare_batch(
+                    img,
+                    self.transform,
+                    boxes,
+                    masks_binary,
+                    masks_score,
+                    img_com_dict=img_com_dict,
+                    kps=cur_kps,
+                )
+                if cur_kps.shape[-1] == 3:
+                    kp3 = cur_kps[:, :, 2:3]
                     kps_list.append(np.concatenate([batch['keypoints_2d'].numpy(), kp3], axis=-1))
                 else:
-                    batch = prepare_batch(img, self.transform, boxes, masks_binary, masks_score, img_com_dict=img_com_dict, kps=kps_batch[i])
                     kps_list.append(batch['keypoints_2d'].numpy())
                     # save for debuging :D
                     # draw_points_with_indices(batch['img'][0][0], batch['keypoints_2d'].numpy()[0], "kp-0.jpg")
