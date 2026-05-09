@@ -2,7 +2,6 @@
 import numpy as np
 import torch
 import cv2
-from sam_3d_body.visualization.renderer import Renderer
 from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
 from utils.painter import color_list
@@ -14,6 +13,8 @@ visualizer.set_pose_meta(mhr70_pose_info)
 
 
 def visualize_sample(img_cv2, outputs, faces, id_current):
+	from sam_3d_body.visualization.renderer import Renderer
+
 	img_mesh = img_cv2.copy()
 	img_mesh = np.ones_like(img_mesh) * 255
 
@@ -78,6 +79,8 @@ def draw_keypoints_with_index(
     return out
 
 def visualize_sample_together(img_cv2, outputs, faces, id_current):
+	from sam_3d_body.visualization.renderer import Renderer
+
 	# Render everything together
 	img_mesh = img_cv2.copy()
 	if outputs is None:

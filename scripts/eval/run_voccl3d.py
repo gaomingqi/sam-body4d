@@ -500,7 +500,12 @@ def infer_sequence_mask(
             os.replace(tmp_out_path, out_path)
 
     with torch.autocast("cuda", enabled=False):
-        predictor.on_4d_generation(frame_paths, seq_path=seq_dir, kps_list=None)
+        predictor.on_4d_generation(
+            frame_paths,
+            seq_path=seq_dir,
+            kps_list=None,
+            render=False,
+        )
 
     mhr_count = count_mhr_outputs(out_dir)
     save_inference_metadata(

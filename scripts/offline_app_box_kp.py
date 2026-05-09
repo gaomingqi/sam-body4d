@@ -25,7 +25,6 @@ from omegaconf import OmegaConf
 
 from models.sam_3d_body.sam_3d_body import load_sam_3d_body, SAM3DBodyEstimator
 from models.sam_3d_body.notebook.utils import process_image_with_bbox
-from models.sam_3d_body.tools.vis_utils import visualize_sample_together
 from models.diffusion_vas.demo import init_amodal_segmentation_model, init_rgb_model, init_depth_model, load_and_transform_masks, load_and_transform_rgbs, rgb_to_depth
 
 import torch
@@ -141,11 +140,11 @@ class offline_app:
         - render 4D visualization video
         For now, just log and return None.
         """
-        os.makedirs(f"{self.OUTPUT_DIR}/rendered_frames", exist_ok=True)
         os.makedirs(f"{self.OUTPUT_DIR}/mhr_params", exist_ok=True)
-        for obj_id in range(len(box_list)):
-            os.makedirs(f"{self.OUTPUT_DIR}/mesh_4d_individual/{obj_id+1}", exist_ok=True)
-            os.makedirs(f"{self.OUTPUT_DIR}/rendered_frames_individual/{obj_id+1}", exist_ok=True)
+        if render:
+            os.makedirs(f"{self.OUTPUT_DIR}/rendered_frames", exist_ok=True)
+            for obj_id in range(len(box_list)):
+                os.makedirs(f"{self.OUTPUT_DIR}/rendered_frames_individual/{obj_id+1}", exist_ok=True)
 
         batch_size = self.RUNTIME['batch_size']
         n = len(images_list)
@@ -184,6 +183,8 @@ class offline_app:
                     id_current = id_batch[frame_id-num_empth_ids]
                 
                 if render and mask_output is not None:
+                    from models.sam_3d_body.tools.vis_utils import visualize_sample_together
+
                     img = cv2.imread(image_path)
                     rend_img = visualize_sample_together(img, mask_output, self.sam3_3d_body_model.faces, id_current)
                     out = rend_img.copy()

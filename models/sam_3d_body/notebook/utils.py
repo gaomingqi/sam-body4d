@@ -13,7 +13,6 @@ import json
 
 from sam_3d_body import load_sam_3d_body_hf, SAM3DBodyEstimator
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
-from sam_3d_body.visualization.renderer import Renderer
 from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 
 from utils.painter import color_list
@@ -155,6 +154,8 @@ def visualize_3d_mesh(
     img_cv2: np.ndarray, outputs: List[Dict[str, Any]], faces: np.ndarray
 ) -> List[np.ndarray]:
     """Visualize 3D mesh overlaid on image and side view"""
+    from sam_3d_body.visualization.renderer import Renderer
+
     results = []
 
     for pid, person_output in enumerate(outputs):
@@ -223,6 +224,7 @@ def save_mesh_results(
 
     if outputs is None:
         return
+    from sam_3d_body.visualization.renderer import Renderer
 
     for pid, person_output in enumerate(outputs):
         # Create renderer for this person

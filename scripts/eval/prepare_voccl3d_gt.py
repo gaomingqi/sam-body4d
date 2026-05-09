@@ -90,6 +90,21 @@ def infer_gender(sequence_name):
     return match.group(0)
 
 
+def list_scene_roots(voccl3d_root):
+    if (voccl3d_root / "images").is_dir() and (voccl3d_root / "transformation_files").is_dir():
+        return [voccl3d_root]
+    return [
+        p for p in sorted(voccl3d_root.iterdir())
+        if p.is_dir() and (p / "images").is_dir() and (p / "transformation_files").is_dir()
+    ]
+
+
+def gt_sequence_key(voccl3d_root, scene_root, seq_name):
+    if scene_root.resolve() == voccl3d_root.resolve():
+        return os.path.join("images", seq_name)
+    return os.path.join(scene_root.name, "images", seq_name)
+
+
 def select_sequences(pair_file, voccl3d_root, amass_root, requested):
     pairs = np.load(pair_file, allow_pickle=True).item()
     voccl3d_root = Path(voccl3d_root)
@@ -97,25 +112,40 @@ def select_sequences(pair_file, voccl3d_root, amass_root, requested):
     requested_set = None if requested in (None, "", "all") else {
         x.strip() for x in requested.split(",") if x.strip()
     }
+    scene_roots = {p.name: p for p in list_scene_roots(voccl3d_root)}
 
     selected = []
     skipped = []
     for pair_key, amass_rel in sorted(pairs.items()):
-        if voccl3d_root.name not in pair_key:
+        pair_path = Path(pair_key)
+        if len(pair_path.parts) < 3:
             continue
 
-        seq_name = Path(pair_key).stem
-        if requested_set is not None and seq_name not in requested_set:
+        scene_name = pair_path.parts[-3]
+        scene_root = scene_roots.get(scene_name)
+        if scene_root is None:
             continue
 
-        seq_dir = voccl3d_root / "images" / seq_name
-        trans_path = voccl3d_root / "transformation_files" / f"{seq_name}.npy"
+        seq_name = pair_path.stem
+        gt_key = gt_sequence_key(voccl3d_root, scene_root, seq_name)
+        requested_names = {
+            seq_name,
+            os.path.join(scene_name, seq_name),
+            os.path.join(scene_name, "images", seq_name),
+            gt_key,
+        }
+        if requested_set is not None and requested_set.isdisjoint(requested_names):
+            continue
+
+        seq_dir = scene_root / "images" / seq_name
+        trans_path = scene_root / "transformation_files" / f"{seq_name}.npy"
         amass_path = amass_root / Path(*Path(amass_rel).parts[1:])
+        camera_path = scene_root / "images" / "camera_parameters.txt"
 
-        if not seq_dir.is_dir() or not trans_path.exists() or not amass_path.exists():
-            skipped.append((seq_name, seq_dir, trans_path, amass_path))
+        if not seq_dir.is_dir() or not trans_path.exists() or not amass_path.exists() or not camera_path.exists():
+            skipped.append((gt_key, seq_dir, trans_path, amass_path, camera_path))
             continue
-        selected.append((seq_name, seq_dir, trans_path, amass_path))
+        selected.append((gt_key, seq_name, seq_dir, trans_path, amass_path, camera_path))
 
     return selected, skipped
 
@@ -268,15 +298,18 @@ def main():
     if not selected:
         raise RuntimeError("No sequences selected with available image, transform, and AMASS files.")
 
-    camera_intrinsic, camera_extrinsic = load_camera_params(voccl3d_root / "images" / "camera_parameters.txt")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     models = build_models(args.body_model_path, device)
     smplx2smpl = torch.load(args.smplx2smpl, map_location=device).to(device).to_dense()
     j_regressor = load_joint_regressor(args.j_regressor, device)
 
     save_dict = {}
-    for seq_name, seq_dir, trans_path, amass_path in tqdm(selected, desc="Preparing VOccl3D GT"):
+    camera_cache = {}
+    for gt_key, seq_name, seq_dir, trans_path, amass_path, camera_path in tqdm(selected, desc="Preparing VOccl3D GT"):
         gender = infer_gender(seq_name)
+        if camera_path not in camera_cache:
+            camera_cache[camera_path] = load_camera_params(camera_path)
+        camera_intrinsic, camera_extrinsic = camera_cache[camera_path]
         gt_single = process_sequence(
             seq_name=seq_name,
             seq_dir=seq_dir,
@@ -291,15 +324,20 @@ def main():
             bbox_img_size=args.bbox_img_size,
             device=device,
         )
-        save_dict[os.path.join("images", seq_name)] = gt_single
+        save_dict[gt_key] = gt_single
 
     output.parent.mkdir(parents=True, exist_ok=True)
     np.save(output, save_dict)
     print(f"[OK] saved {len(save_dict)} sequences -> {output}")
     if skipped:
         print(f"[SKIP] {len(skipped)} sequences missing required files:")
-        for seq_name, _, _, amass_path in skipped:
-            print(f"  {seq_name}: missing AMASS {amass_path}")
+        for gt_key, seq_dir, trans_path, amass_path, camera_path in skipped:
+            missing = [
+                str(path)
+                for path in (seq_dir, trans_path, amass_path, camera_path)
+                if not path.exists()
+            ]
+            print(f"  {gt_key}: missing {', '.join(missing)}")
 
 
 if __name__ == "__main__":
