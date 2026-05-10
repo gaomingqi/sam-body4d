@@ -10,9 +10,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
-import cv2
 import numpy as np
-import torch
 from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm
@@ -26,9 +24,6 @@ SAM3D_DIR = os.path.join(REPO_DIR, "models", "sam_3d_body")
 for path in (SCRIPTS_DIR, REPO_DIR, DIFFUSION_VAS_DIR, SAM3D_DIR):
     if path not in sys.path:
         sys.path.append(path)
-
-from utils import DAVIS_PALETTE, keep_largest_component  # noqa: E402
-
 
 DEFAULT_DATA_ROOT = "/home/mingqi/data/datasets/hmr/VOccl3D"
 DEFAULT_RESULT_ROOT = "/home/mingqi/data/results/hmr/VOccl3D_mask"
@@ -52,6 +47,7 @@ class Segment:
     end: int
     clip_start: int
     clip_end: int
+    replace_indices: list
     score: float
     mean_area_ratio: float
     mean_kp_jump: float
@@ -163,6 +159,8 @@ def visible_gpu_ids():
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible and visible.strip() and visible.strip() != "-1":
         return [x.strip() for x in visible.split(",") if x.strip()]
+    import torch
+
     if not torch.cuda.is_available():
         return []
     return [str(i) for i in range(torch.cuda.device_count())]
@@ -386,7 +384,13 @@ def detect_segments(frame_paths, mask_paths, mhr_dir, args):
         jump_ratio=args.kp_jump_ratio,
         jump_min=args.kp_jump_min,
     )
-    bad = fill_short_gaps(area_flags & kp_flags, args.merge_gap)
+    if args.segment_signal == "mask":
+        trigger_flags = area_flags
+    elif args.segment_signal == "mask_and_kps":
+        trigger_flags = area_flags & kp_flags
+    else:
+        raise ValueError(f"Unsupported segment_signal: {args.segment_signal}")
+    bad = fill_short_gaps(trigger_flags, args.merge_gap)
 
     segments = []
     for start, end in bool_runs(bad):
@@ -399,18 +403,28 @@ def detect_segments(frame_paths, mask_paths, mhr_dir, args):
             continue
         if bad[clip_start:start].any() or bad[end + 1 : clip_end + 1].any():
             continue
-        area_severity = float(np.mean(1.0 - area_ratios[start : end + 1]))
-        jump_mean = float(np.mean(kp_scores[start : end + 1]))
-        jump_threshold = float(np.mean(kp_thresholds[start : end + 1]) + 1e-6)
-        score = area_severity + min(3.0, jump_mean / jump_threshold)
+        if args.replace_normal_frames:
+            replace_indices = list(range(start, end + 1))
+        else:
+            replace_indices = [idx for idx in range(start, end + 1) if trigger_flags[idx]]
+        if not replace_indices:
+            continue
+        replace_indices_np = np.asarray(replace_indices, dtype=np.int64)
+        area_severity = float(np.mean(1.0 - area_ratios[replace_indices_np]))
+        jump_mean = float(np.mean(kp_scores[replace_indices_np]))
+        jump_threshold = float(np.mean(kp_thresholds[replace_indices_np]) + 1e-6)
+        score = area_severity
+        if args.segment_signal == "mask_and_kps":
+            score += min(3.0, jump_mean / jump_threshold)
         segments.append(
             Segment(
                 start=start,
                 end=end,
                 clip_start=clip_start,
                 clip_end=clip_end,
+                replace_indices=replace_indices,
                 score=score,
-                mean_area_ratio=float(np.mean(area_ratios[start : end + 1])),
+                mean_area_ratio=float(np.mean(area_ratios[replace_indices_np])),
                 mean_kp_jump=jump_mean,
             )
         )
@@ -433,7 +447,13 @@ def detect_segments(frame_paths, mask_paths, mhr_dir, args):
         "kp_scores": kp_scores,
         "kp_thresholds": kp_thresholds,
         "kp_flags": kp_flags.astype(np.uint8),
+        "trigger_flags": trigger_flags.astype(np.uint8),
         "bad_flags": bad.astype(np.uint8),
+        "replace_flags": (
+            bad.astype(np.uint8)
+            if args.replace_normal_frames
+            else trigger_flags.astype(np.uint8)
+        ),
     }
     return selected, debug
 
@@ -458,6 +478,8 @@ def indexed_link_folder(paths, dst_dir):
 
 
 def save_palette_mask(mask, path, obj_id=1):
+    from utils import DAVIS_PALETTE
+
     mask_idx = np.zeros(mask.shape, dtype=np.uint8)
     mask_idx[mask > 0] = obj_id
     img = Image.fromarray(mask_idx).convert("P")
@@ -469,6 +491,8 @@ def save_palette_mask(mask, path, obj_id=1):
 
 
 def binarize_pipeline_masks(mask_frames, target_hw):
+    from utils.mask_utils import keep_largest_component
+
     masks = []
     target_h, target_w = target_hw
     for img in mask_frames:
@@ -481,6 +505,9 @@ def binarize_pipeline_masks(mask_frames, target_hw):
 
 
 def run_completion_for_segment(models, frame_paths, mask_paths, segment, out_seq_dir, args):
+    import cv2
+    import torch
+
     (
         cfg,
         estimator,
@@ -495,7 +522,7 @@ def run_completion_for_segment(models, frame_paths, mask_paths, segment, out_seq
     clip_indices = list(range(segment.clip_start, segment.clip_end + 1))
     clip_frames = [frame_paths[i] for i in clip_indices]
     clip_masks = [mask_paths[i] for i in clip_indices]
-    occ_global = set(range(segment.start, segment.end + 1))
+    occ_global = set(segment.replace_indices)
     occ_local = [i for i, global_i in enumerate(clip_indices) if global_i in occ_global]
 
     seg_name = f"segment_{segment.start:04d}_{segment.end:04d}"
@@ -608,7 +635,7 @@ def run_completion_for_segment(models, frame_paths, mask_paths, segment, out_seq
             estimator,
             completed_frame_paths,
             completed_mask_paths,
-            [frame_paths[i] for i in range(segment.start, segment.end + 1)],
+            [frame_paths[i] for i in segment.replace_indices],
             out_seq_dir,
             cam_int=cam_int,
             batch_size=args.batch_size,
@@ -618,7 +645,7 @@ def run_completion_for_segment(models, frame_paths, mask_paths, segment, out_seq
     return {
         "segment": asdict(segment),
         "clip_indices": clip_indices,
-        "completed_global_indices": list(range(segment.start, segment.end + 1)),
+        "completed_global_indices": list(segment.replace_indices),
         "completion_dir": seg_dir,
         "num_completed": len(completed_frame_paths),
     }
@@ -634,6 +661,7 @@ def reconstruct_completed_frames(
     batch_size,
     obj_id=1,
 ):
+    import torch
     from models.sam_3d_body.notebook.utils import process_image_with_mask  # noqa: WPS433
 
     mhr_shape_scale_dict = {}
@@ -803,6 +831,8 @@ def process_sequence(record, args, models=None):
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "thresholds": {
                 "area_drop_ratio": args.area_drop_ratio,
+                "segment_signal": args.segment_signal,
+                "replace_normal_frames": bool(args.replace_normal_frames),
                 "kp_jump_ratio": args.kp_jump_ratio,
                 "kp_jump_min": args.kp_jump_min,
                 "max_occ_len": args.max_occ_len,
@@ -820,6 +850,8 @@ def process_sequence(record, args, models=None):
 
 
 def run_single_process(args):
+    if not args.quiet:
+        print("[START] scanning selected VOccl3D mask results ...", flush=True)
     records = list_sequences(
         args.data_root,
         args.result_root,
@@ -832,6 +864,19 @@ def run_single_process(args):
     if args.expected_sequences is not None and len(records) != args.expected_sequences:
         raise RuntimeError(f"Expected {args.expected_sequences} sequences, found {len(records)}.")
 
+    if args.list_only:
+        total_frames = sum(sequence_frame_count(record) for record in records)
+        print(
+            f"[LIST] selected={len(records)} total_frames={total_frames} "
+            f"result_root={args.result_root}",
+            flush=True,
+        )
+        for record in records[: min(20, len(records))]:
+            print(f"[LIST] {record.name} frames={sequence_frame_count(record)}", flush=True)
+        if len(records) > 20:
+            print(f"[LIST] ... {len(records) - 20} more", flush=True)
+        return
+
     os.makedirs(args.save_root, exist_ok=True)
     todo = []
     for record in records:
@@ -841,7 +886,7 @@ def run_single_process(args):
         todo.append(record)
 
     if not args.quiet:
-        print(f"[VOCCL3D] selected={len(records)} todo={len(todo)} result_root={args.result_root}")
+        print(f"[VOCCL3D] selected={len(records)} todo={len(todo)} result_root={args.result_root}", flush=True)
     if not todo:
         return
 
@@ -892,6 +937,8 @@ def build_worker_command(args, seq_names, worker_id, show_progress):
         str(args.ref_window),
         "--area_drop_ratio",
         str(args.area_drop_ratio),
+        "--segment_signal",
+        args.segment_signal,
         "--kp_jump_ratio",
         str(args.kp_jump_ratio),
         "--kp_jump_min",
@@ -926,6 +973,8 @@ def build_worker_command(args, seq_names, worker_id, show_progress):
         cmd.append("--overwrite_base")
     if args.dry_run:
         cmd.append("--dry_run")
+    if args.replace_normal_frames:
+        cmd.append("--replace_normal_frames")
     if show_progress:
         cmd.append("--show_progress")
     else:
@@ -942,9 +991,14 @@ def tail_file(path, num_lines=40):
 
 
 def launch_multi_gpu(args):
+    print(
+        f"[START] multi_gpu={args.multi_gpu} gpus={args.gpus} "
+        f"result_root={args.result_root}",
+        flush=True,
+    )
     gpus = parse_gpus(args.gpus)
     if not gpus:
-        print("[MULTI-GPU] No CUDA GPUs detected; falling back to single process.")
+        print("[MULTI-GPU] No CUDA GPUs detected; falling back to single process.", flush=True)
         return run_single_process(args)
 
     records = list_sequences(
@@ -958,6 +1012,19 @@ def launch_multi_gpu(args):
         records = records[: args.max_sequences]
     if args.expected_sequences is not None and len(records) != args.expected_sequences:
         raise RuntimeError(f"Expected {args.expected_sequences} sequences, found {len(records)}.")
+
+    if args.list_only:
+        total_frames = sum(sequence_frame_count(record) for record in records)
+        print(
+            f"[LIST] selected={len(records)} total_frames={total_frames} "
+            f"gpus={','.join(gpus)}",
+            flush=True,
+        )
+        for record in records[: min(20, len(records))]:
+            print(f"[LIST] {record.name} frames={sequence_frame_count(record)}", flush=True)
+        if len(records) > 20:
+            print(f"[LIST] ... {len(records) - 20} more", flush=True)
+        return
     if not args.overwrite:
         records = [
             r
@@ -965,7 +1032,7 @@ def launch_multi_gpu(args):
             if not os.path.exists(os.path.join(r.output_dir, "completion_optimization_meta.json"))
         ]
     if not records:
-        print("[MULTI-GPU] all selected sequences are already complete.")
+        print("[MULTI-GPU] all selected sequences are already complete.", flush=True)
         return
 
     num_workers = min(len(gpus), len(records))
@@ -1006,7 +1073,8 @@ def launch_multi_gpu(args):
         print(
             f"[MULTI-GPU] worker {worker_id} -> GPU {gpu_id}, "
             f"{len(seq_names)} seqs/{cost} frames, "
-            f"{'terminal progress' if show_progress else 'log ' + log_path}"
+            f"{'terminal progress' if show_progress else 'log ' + log_path}",
+            flush=True,
         )
         proc = subprocess.Popen(
             cmd,
@@ -1029,14 +1097,14 @@ def launch_multi_gpu(args):
 
     manifest_path = os.path.join(log_dir, f"completion_opt_{timestamp}_manifest.json")
     save_json(manifest_path, manifest)
-    print(f"[MULTI-GPU] manifest -> {manifest_path}")
+    print(f"[MULTI-GPU] manifest -> {manifest_path}", flush=True)
 
     failures = []
     for worker_id, gpu_id, log_path, log_f, proc in procs:
         ret = proc.wait()
         if log_f is not None:
             log_f.close()
-        print(f"[MULTI-GPU] worker {worker_id} on GPU {gpu_id} exited with {ret}")
+        print(f"[MULTI-GPU] worker {worker_id} on GPU {gpu_id} exited with {ret}", flush=True)
         if ret != 0:
             failures.append((worker_id, gpu_id, ret, log_path))
     if failures:
@@ -1072,6 +1140,12 @@ def main():
     parser.add_argument("--completion_resolution", default=None, help="Override config completion_resolution, e.g. 256,512")
     parser.add_argument("--ref_window", type=int, default=8)
     parser.add_argument("--area_drop_ratio", type=float, default=0.65)
+    parser.add_argument(
+        "--segment_signal",
+        choices=("mask", "mask_and_kps"),
+        default="mask",
+        help="Signal used to select local completion segments. Default mask ignores 3D keypoint jumps.",
+    )
     parser.add_argument("--kp_jump_ratio", type=float, default=2.5)
     parser.add_argument("--kp_jump_min", type=float, default=0.08)
     parser.add_argument("--min_mask_area", type=float, default=512.0)
@@ -1079,12 +1153,18 @@ def main():
     parser.add_argument("--context", type=int, default=2)
     parser.add_argument("--max_occ_len", type=int, default=32)
     parser.add_argument("--max_segments_per_video", type=int, default=2)
+    parser.add_argument(
+        "--replace_normal_frames",
+        action="store_true",
+        help="Replace every frame inside a selected bad run. By default only frames that trigger the selected signal are replaced.",
+    )
     parser.add_argument("--max_frames", type=int, default=None)
     parser.add_argument("--max_sequences", type=int, default=None)
     parser.add_argument("--expected_sequences", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true", help="Re-process sequences even when optimization meta exists.")
     parser.add_argument("--overwrite_base", action="store_true", help="Overwrite mirrored source masks/MHR before optimization.")
     parser.add_argument("--dry_run", action="store_true", help="Only detect local segments and mirror source outputs; do not load GPU models.")
+    parser.add_argument("--list_only", action="store_true", help="Only list selected sequences and frame counts, then exit.")
     parser.add_argument("--multi_gpu", action="store_true")
     parser.add_argument("--gpus", default="auto")
     parser.add_argument("--progress_gpu", default="0")
