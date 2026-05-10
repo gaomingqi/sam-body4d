@@ -11,7 +11,7 @@ import smplx
 
 
 DEFAULT_VOCCL3D_ROOT = "/home/mingqi/data/datasets/hmr/VOccl3D/scene9_view1"
-DEFAULT_AMASS_ROOT = "/home/mingqi/data/datasets/hmr/aamas"
+DEFAULT_AMASS_ROOT = "/home/mingqi/data/datasets/hmr/amass"
 DEFAULT_PAIR_FILE = (
     "/home/mingqi/projects/hmr/VOccl3D-dataset/prepare_and_download_dataset/"
     "voccl3d_dataset_release_amass_file_pairs.npy"

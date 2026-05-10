@@ -168,15 +168,37 @@ def forward_smplx_params_to_smpl_vertices(smplx_params, body_model_path, batch_s
     return torch.cat(smpl_vertices, dim=0), torch.cat(smplx_vertices, dim=0)
 
 
-def load_voccl3d_gt_smpl(voccl3d_root, gt_file, sequence, frame_names, batch_size, device):
+def load_voccl3d_gt_smpl(
+    voccl3d_root,
+    gt_file,
+    sequence,
+    frame_names,
+    batch_size,
+    device,
+    gt_all=None,
+):
     gt_path = gt_file or os.path.join(
         voccl3d_root,
         f"{os.path.basename(voccl3d_root.rstrip(os.sep))}_ground_truth_labels.npy",
     )
-    gt_all = np.load(gt_path, allow_pickle=True).item()
-    gt_key = os.path.join("images", sequence)
-    if gt_key not in gt_all:
-        raise KeyError(f"Sequence {gt_key} not found in GT file {gt_path}")
+    if gt_all is None:
+        gt_all = np.load(gt_path, allow_pickle=True).item()
+    scene_name = os.path.basename(voccl3d_root.rstrip(os.sep))
+    seq_parts = sequence.split(os.sep)
+    gt_key_candidates = [
+        os.path.join("images", sequence),
+        sequence,
+    ]
+    if scene_name.startswith("scene"):
+        gt_key_candidates.append(os.path.join(scene_name, "images", sequence))
+    if len(seq_parts) >= 2 and seq_parts[0].startswith("scene"):
+        gt_key_candidates.append(os.path.join(seq_parts[0], "images", *seq_parts[1:]))
+
+    gt_key = next((key for key in gt_key_candidates if key in gt_all), None)
+    if gt_key is None:
+        raise KeyError(
+            f"Sequence {sequence} not found in GT file {gt_path}; tried {gt_key_candidates}"
+        )
 
     gt_seq = gt_all[gt_key]
     missing = [name for name in frame_names if name not in gt_seq]
@@ -256,6 +278,7 @@ def evaluate_sequence(args, sequence):
         frame_names,
         args.batch_size,
         device,
+        gt_all=getattr(args, "gt_all", None),
     )
     metrics, pred_j3d, gt_j3d = compute_voccl3d_metrics(
         args,

@@ -628,6 +628,39 @@ def sequence_frame_count(seq_dir, max_frames=None):
     return len(load_frame_paths(seq_dir, max_frames=max_frames))
 
 
+def sequence_scene_name(seq_name):
+    parts = seq_name.split(os.sep)
+    return parts[0] if len(parts) > 1 else "<single_scene>"
+
+
+def summarize_sequence_names(seq_names):
+    summary = {}
+    for seq_name in seq_names:
+        scene = sequence_scene_name(seq_name)
+        summary[scene] = summary.get(scene, 0) + 1
+    return dict(sorted(summary.items()))
+
+
+def print_sequence_summary(label, seq_names):
+    scene_counts = summarize_sequence_names(seq_names)
+    detail = ", ".join(f"{scene}:{count}" for scene, count in scene_counts.items())
+    print(f"[VOCCL3D] {label}: {len(seq_names)} sequences")
+    if detail:
+        print(f"[VOCCL3D] {label} by scene: {detail}")
+
+
+def validate_expected_sequences(args, seq_names):
+    if args.expected_sequences is None:
+        return
+    expected = int(args.expected_sequences)
+    if len(seq_names) != expected:
+        scene_counts = summarize_sequence_names(seq_names)
+        raise RuntimeError(
+            f"Expected {expected} VOccl3D sequences, but found {len(seq_names)}. "
+            f"Scene counts: {scene_counts}. Check --data_root/--sequence before running."
+        )
+
+
 def split_sequences_balanced(seq_dirs, num_shards, max_frames=None):
     shards = [[] for _ in range(num_shards)]
     shard_costs = [0 for _ in range(num_shards)]
@@ -732,6 +765,9 @@ def launch_multi_gpu(args):
         return run_single_process(args)
 
     seq_dirs = selected_sequence_dirs(args)
+    selected_names = [sequence_name(p, args.voccl3d_root) for p in seq_dirs]
+    print_sequence_summary("selected", selected_names)
+    validate_expected_sequences(args, selected_names)
     if not args.overwrite:
         skipped = [
             sequence_name(p, args.voccl3d_root)
@@ -743,11 +779,13 @@ def launch_multi_gpu(args):
             if not has_complete_mhr(p, args.output_dir, args.voccl3d_root, max_frames=args.max_frames)
         ]
         if skipped:
-            print(f"[MULTI-GPU] skipping {len(skipped)} completed sequences: {', '.join(skipped)}")
+            print_sequence_summary("skipped complete", skipped)
     if not seq_dirs:
         print("[MULTI-GPU] all selected sequences are already complete.")
         return
 
+    to_run_names = [sequence_name(p, args.voccl3d_root) for p in seq_dirs]
+    print_sequence_summary("to run", to_run_names)
     num_workers = min(len(gpus), len(seq_dirs))
     shards, shard_costs = split_sequences_balanced(seq_dirs, num_workers, max_frames=args.max_frames)
     log_dir = os.path.join(args.output_dir, ".logs")
@@ -765,10 +803,31 @@ def launch_multi_gpu(args):
 
     procs = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    manifest = {
+        "timestamp": timestamp,
+        "data_root": args.voccl3d_root,
+        "output_dir": args.output_dir,
+        "prompt_mode": args.prompt_mode,
+        "mask_mode": args.mask_mode,
+        "gpus": gpus,
+        "selected_sequences": selected_names,
+        "skipped_sequences": skipped if not args.overwrite else [],
+        "to_run_sequences": to_run_names,
+        "shards": [],
+    }
     for worker_id, (gpu_id, shard, cost) in enumerate(zip(gpus, shards, shard_costs)):
         if not shard:
             continue
         seq_names = [sequence_name(p, args.voccl3d_root) for p in shard]
+        manifest["shards"].append(
+            {
+                "worker_id": worker_id,
+                "gpu_id": gpu_id,
+                "num_sequences": len(seq_names),
+                "num_frames": int(cost),
+                "sequences": seq_names,
+            }
+        )
         stream_to_terminal = progress_gpu_enabled and (
             gpu_id == progress_gpu or worker_id == stream_fallback_worker
         )
@@ -798,6 +857,11 @@ def launch_multi_gpu(args):
             stderr=subprocess.STDOUT,
         )
         procs.append((worker_id, gpu_id, log_path, log_f, proc))
+
+    manifest_path = os.path.join(log_dir, f"run_voccl3d_{args.prompt_mode}_{timestamp}_manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    print(f"[MULTI-GPU] manifest -> {manifest_path}")
 
     failures = []
     for worker_id, gpu_id, log_path, log_f, proc in procs:
@@ -862,6 +926,9 @@ def apply_config_overrides(args):
 
 def run_single_process(args):
     seq_dirs = selected_sequence_dirs(args)
+    selected_names = [sequence_name(p, args.voccl3d_root) for p in seq_dirs]
+    print_sequence_summary("selected", selected_names)
+    validate_expected_sequences(args, selected_names)
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = apply_config_overrides(args)
 
@@ -954,6 +1021,12 @@ def main():
     parser.add_argument("--render_box", action="store_true", help="Box mode: also save rendered_frames with boxes.")
     parser.add_argument("--multi_gpu", action="store_true", help="Launch one worker process per selected GPU.")
     parser.add_argument("--gpus", default="auto", help="auto or comma-separated GPU ids, e.g. 0,1,2")
+    parser.add_argument(
+        "--expected_sequences",
+        type=int,
+        default=None,
+        help="Abort if selected VOccl3D sequence count does not match this value.",
+    )
     parser.add_argument(
         "--progress_gpu",
         default="0",
