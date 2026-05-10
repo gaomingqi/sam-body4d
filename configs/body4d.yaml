@@ -29,7 +29,7 @@ runtime:
 completion:
   enable: false
   detection_resolution: [256, 512]
-  completion_resolution: [256, 512]
+  completion_resolution: [512, 1024]
   # download (xxx_mask & xxx_rgb): https://github.com/Kaihua-Chen/diffusion-vas?tab=readme-ov-file#download-checkpoints
   model_path_mask: ${paths.ckpt_root}/diffusion-vas-amodal-segmentation
   model_path_rgb:  ${paths.ckpt_root}/diffusion-vas-content-completion
