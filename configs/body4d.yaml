@@ -26,7 +26,6 @@ sam_3d_body:
 
 runtime:
   output_dir: ./outputs
-
 completion:
   enable: false
   detection_resolution: [256, 512]

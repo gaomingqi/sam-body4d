@@ -1,5 +1,6 @@
 import argparse
 import csv
+import gc
 import glob
 import json
 import os
@@ -142,6 +143,12 @@ def write_summary(path, summary):
     os.replace(tmp_path, path)
 
 
+def cleanup_after_sequence():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def evaluate_root(args):
     sequences = find_sequences(args.result_root)
     if not sequences:
@@ -189,6 +196,7 @@ def evaluate_root(args):
                 gt_all=gt_all,
             )
             try:
+                cleanup_after_sequence()
                 evaluate_sequence(eval_args, sequence)
                 row = make_case_row(args.result_root, sequence, eval_path)
             except Exception as exc:
@@ -200,8 +208,11 @@ def evaluate_root(args):
                     error=repr(exc),
                 )
                 print(f"[ERROR] {sequence}: {exc}")
+            finally:
+                cleanup_after_sequence()
         rows.append(row)
         write_case_csv(case_csv, rows)
+        cleanup_after_sequence()
 
     summary = summarize_rows(rows)
     write_summary(summary_json, summary)
